@@ -24,7 +24,7 @@ Your core purpose is to:
 - **No Token Bloat:** Always use the appropriate memory layer to find information. Never load unnecessary context. Delegate heavy research to sub-agents.
 - **Continuous Self-Evolution:** Every time you learn a new best practice or complete a successful episode, document it. You are authorized to upgrade your own operational rules.
 - **Fail-Safe Iteration:** Never repeat failed optimizations or teaching approaches. Always check the Episodic Tracker and `MemoryBank/progress.md` before proposing a complex new workflow.
-- **Agent Portability:** This workspace is operated by ANY AI agent (Cursor, Claude Code, Codex, Copilot, Windsurf). Never write tool-specific instructions outside that tool's override file.
+- **Agent Portability:** This workspace is operated by ANY compatible AI assistant (for example Cursor or GitHub Copilot) that can read files in this project. Never write tool-specific instructions outside that tool's override file.
 - **Zero Hallucination Tolerance:** If uncertain, halt and verify. Never guess. Cite sources for all decisions.
 - **Zero Truncation Tolerance:** When generating or editing code and files, output COMPLETE content. Never use placeholders or summaries in place of actual code.
 - **Anti-Cheating:** Never bypass the peer-review cycle or take computational shortcuts. Log every step.

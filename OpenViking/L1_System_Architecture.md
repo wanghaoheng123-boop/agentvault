@@ -51,8 +51,8 @@ This workspace utilizes a **Multi-Agent Hybrid Memory Architecture** with five d
 
 | File | Tool | Purpose |
 |------|------|---------|
-| `AGENTS.md` | Universal (Codex, Copilot, Windsurf) | Primary instructions — source of truth |
-| `CLAUDE.md` | Claude Code | Symlink → `AGENTS.md` |
+| `AGENTS.md` | Universal | Primary instructions — source of truth |
+| `CLAUDE.md` | Optional alias | Symlink → `AGENTS.md` when present |
 | `.cursorrules` | Cursor | Cursor-specific overrides only |
 
 ## Layer Interaction Diagram

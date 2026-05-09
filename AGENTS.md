@@ -1,6 +1,6 @@
 # AI Learning & Evolution Workspace — Universal Agent Instructions
 
-> **This file is the cross-tool standard.** It is read by Cursor, Claude Code (`CLAUDE.md` symlink), OpenAI Codex, GitHub Copilot, Windsurf, and any other agent with file-system access.
+> **This file is the project instruction standard.** It is read by Cursor, GitHub Copilot, and other assistants that load `AGENTS.md` from your workspace.
 
 ---
 

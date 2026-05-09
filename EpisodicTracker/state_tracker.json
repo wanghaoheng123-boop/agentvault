@@ -33,7 +33,7 @@
         "medium": 1
       },
       "status": "success",
-      "outcome": "All 10 issues rectified. Workspace now fully portable across Cursor, Claude Code, Codex, Copilot, and Windsurf.",
+      "outcome": "All 10 issues rectified. Workspace portable across assistants that load AGENTS.md (e.g. Cursor, GitHub Copilot).",
       "learnings": "Always create AGENTS.md as the primary instruction file. Always version schemas. Always add .abstract indexes to OpenViking hierarchies. Seed GraphRAG with meaningful initial nodes to prevent cold-start problems.",
       "tags": ["P0", "audit", "rectification"],
       "follow_up": "EP-003"

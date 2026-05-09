@@ -7,8 +7,7 @@
 **One folder. Any agent. Total recall.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
-[![Agents](https://img.shields.io/badge/agents-Cursor%20%7C%20Claude%20%7C%20Codex%20%7C%20Copilot%20%7C%20Windsurf-purple.svg)](#compatibility)
+[![Agents](https://img.shields.io/badge/agents-Cursor%20%7C%20Copilot-purple.svg)](#compatibility)
 
 *Give your AI agent a brain that persists across sessions, tools, and devices.*
 
@@ -40,7 +39,7 @@ git clone https://github.com/YOUR_USERNAME/agentvault.git .agentvault
 cp -r agentvault/ ~/your-project/.agentvault/
 ```
 
-Then open the project in **Cursor, Claude Code, Codex, Copilot, or Windsurf**. The agent auto-detects `AGENTS.md` and boots up with full memory. That's it.
+Then open the project in **Cursor**, **GitHub Copilot**, or any assistant that reads `AGENTS.md`. The agent detects `AGENTS.md` on startup and boots with full memory. That's it.
 
 ---
 
@@ -51,7 +50,7 @@ AgentVault uses a **5-layer hybrid memory architecture** inspired by cognitive s
 ```
 your-project/
 ├── AGENTS.md                        ← 🚪 Entry point (auto-detected by all agents)
-├── CLAUDE.md                        ← 🔗 Symlink → AGENTS.md (Claude Code compat)
+├── CLAUDE.md                        ← 🔗 Optional symlink → AGENTS.md (when present)
 ├── .cursorrules                     ← 🎯 Cursor-specific overrides only
 │
 ├── OpenViking/                      ← 📜 Layer 1: RULES (static, rigid)
@@ -139,14 +138,11 @@ Every project is decomposed into **Epic → Task → SubTask** before execution.
 
 ## <a id="compatibility"></a>🔌 Compatibility
 
-| Agent | Detection File | Status |
-|-------|---------------|--------|
-| **Cursor** | `.cursorrules` | ✅ Full support |
-| **Claude Code** | `CLAUDE.md` (symlink) | ✅ Full support |
-| **OpenAI Codex** | `AGENTS.md` | ✅ Full support |
-| **GitHub Copilot** | `AGENTS.md` | ✅ Full support |
-| **Windsurf** | `AGENTS.md` | ✅ Full support |
-| **Gemini (Antigravity)** | `AGENTS.md` | ✅ Full support |
+| Environment | Detection file | Notes |
+|---------------|----------------|-------|
+| **Cursor** | `.cursorrules`, `AGENTS.md` | Full support |
+| **GitHub Copilot** | `AGENTS.md` | Full support |
+| **Other assistants** | `AGENTS.md` | Supported when the assistant loads project-level instruction files |
 
 ---
 
@@ -166,8 +162,8 @@ Edit `MemoryBank/techContext.md` with your language, framework, and environment.
 ### Step 4: Customize Rules (Optional)
 Edit `OpenViking/L2_Operational_Rules.md` to add project-specific coding standards.
 
-### Step 5: Open in Any Agent
-Open the folder in Cursor, Claude Code, or any supported agent. It will automatically read `AGENTS.md` and operate with full memory.
+### Step 5: Open in your assistant
+Open the folder in Cursor, GitHub Copilot, or any compatible assistant so it reads `AGENTS.md` and operates with full memory.
 
 ---
 
@@ -178,12 +174,6 @@ AgentVault is built on three principles:
 1. **Files are universal.** Every AI agent can read files. No vendor lock-in, no APIs, no databases required.
 2. **Memory should be structured.** Raw context dumps waste tokens. Layered memory (rules → state → graph → history → references) keeps the agent focused.
 3. **Agents should evolve.** The Master Orchestrator is authorized to upgrade its own rules and methodologies over time.
-
----
-
-## 🤝 Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. All contributions welcome — new memory patterns, agent integrations, documentation, and bug fixes.
 
 ---
 
