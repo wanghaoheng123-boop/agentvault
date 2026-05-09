@@ -1,0 +1,63 @@
+{
+  "schema_version": "2.0",
+  "last_updated": "2026-05-09",
+  "description": "Chronological log of all learning episodes, workflow iterations, and tool configurations. Check this BEFORE attempting any complex task to prevent repeating failed iterations.",
+  "concurrency_note": "When writing to this file, use the atomic write pattern: write to state_tracker.json.tmp first, then rename to state_tracker.json. If state_tracker.json.lock exists, wait or skip.",
+  "episodes": [
+    {
+      "episode_id": "EP-001",
+      "timestamp": "2026-05-09T15:34:00+08:00",
+      "category": "setup",
+      "topic": "Workspace Initialization",
+      "action": "Set up Multi-Agent Hybrid Memory Architecture with OpenViking, GraphRAG, Episodic Tracker, and VectorRAG layers.",
+      "parameters_tested": {
+        "architecture": "OpenViking L0/L1/L2 + GraphRAG + Episodic + VectorRAG",
+        "instruction_files": [".cursorrules"]
+      },
+      "status": "success",
+      "outcome": "Successfully isolated rigid rules from time-series tracking to prevent context bloat.",
+      "learnings": "Initial scaffold works but needs enrichment: missing AGENTS.md for portability, missing .abstract index, no YAML frontmatter versioning, GraphRAG schema too sparse, Episodic schema missing status/parameters fields.",
+      "tags": ["P0", "architecture", "initialization"],
+      "follow_up": "EP-002"
+    },
+    {
+      "episode_id": "EP-002",
+      "timestamp": "2026-05-09T15:40:00+08:00",
+      "category": "maintenance",
+      "topic": "Comprehensive Workspace Audit & Rectification",
+      "action": "Identified 10 issues across all memory layers. Applied fixes: added AGENTS.md, CLAUDE.md symlink, .abstract index, YAML frontmatter, enriched GraphRAG with 9 nodes and 9 edges, enriched Episodic schema with status/parameters/category/tags, created VectorRAG subdirectories and index.json, added .gitignore, created README.md.",
+      "parameters_tested": {
+        "issues_found": 10,
+        "critical": 5,
+        "high": 4,
+        "medium": 1
+      },
+      "status": "success",
+      "outcome": "All 10 issues rectified. Workspace now fully portable across Cursor, Claude Code, Codex, Copilot, and Windsurf.",
+      "learnings": "Always create AGENTS.md as the primary instruction file. Always version schemas. Always add .abstract indexes to OpenViking hierarchies. Seed GraphRAG with meaningful initial nodes to prevent cold-start problems.",
+      "tags": ["P0", "audit", "rectification"],
+      "follow_up": "EP-003"
+    },
+    {
+      "episode_id": "EP-003",
+      "timestamp": "2026-05-09T15:48:00+08:00",
+      "category": "architecture",
+      "topic": "Master Orchestrator Protocol Integration",
+      "action": "Integrated the 6-phase Master Orchestrator protocol into the existing workspace. Created MemoryBank layer (6 files: projectbrief.md, productContext.md, systemPatterns.md, techContext.md, progress.md, activeContext.md). Rewrote AGENTS.md with full orchestrator identity, sub-agent registry, ETS hierarchy, adversarial peer review, anti-hallucination mandates, zero-truncation rules. Upgraded all OpenViking files to v2.0. Expanded GraphRAG from 9 nodes/9 edges to 15 nodes/18 edges.",
+      "parameters_tested": {
+        "new_layer": "MemoryBank (6 files)",
+        "agents_md_sections": 7,
+        "openviking_version": "2.0",
+        "graphrag_nodes": 15,
+        "graphrag_edges": 18,
+        "sub_agents_registered": 6,
+        "verification_loop_steps": 5
+      },
+      "status": "success",
+      "outcome": "Workspace now implements full Master Orchestrator protocol: Memory Bank for cross-device continuity, ETS decomposition, sub-agent delegation, adversarial peer review, and anti-hallucination/anti-laziness guardrails.",
+      "learnings": "The Memory Bank (progress.md + activeContext.md) and EpisodicTracker serve complementary roles: progress.md is human-readable append-only history, while state_tracker.json is machine-readable with structured fields for programmatic querying. Both should be maintained. The sub-agent registry in AGENTS.md provides a standard interface for persona-based delegation.",
+      "tags": ["P0", "architecture", "master-orchestrator", "memory-bank"],
+      "follow_up": null
+    }
+  ]
+}

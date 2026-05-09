@@ -1,0 +1,6 @@
+{
+  "schema_version": "1.0",
+  "last_updated": "2026-05-09",
+  "description": "Catalog of all reference materials stored in VectorRAG. Check this index BEFORE searching raw files.",
+  "references": []
+}

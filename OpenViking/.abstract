@@ -1,0 +1,9 @@
+# OpenViking Layer Index (.abstract)
+# Read this FIRST to understand what's in each file without loading full content.
+# Last updated: 2026-05-09
+
+| File | Version | Priority | Summary |
+|------|---------|----------|---------|
+| L0_Core_Directives.md | 2.0 | P0 | Master Orchestrator identity, hyperagent authority, meta-optimization mandate, zero-hallucination/truncation principles, cross-device continuity. |
+| L1_System_Architecture.md | 2.0 | P0 | Defines all five memory layers (OpenViking, MemoryBank, GraphRAG, Episodic, VectorRAG), agent detection files, and layer interaction diagram. |
+| L2_Operational_Rules.md | 2.0 | P1 | ETS hierarchy, multi-agent delegation, 5-step verification loop, anti-hallucination/laziness mandates, conflict resolution, lifecycle tags, concurrent access safety. |

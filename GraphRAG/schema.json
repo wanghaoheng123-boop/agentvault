@@ -1,0 +1,255 @@
+{
+  "schema_version": "2.0",
+  "last_updated": "2026-05-09",
+  "description": "Relational concept map of AI tools, technologies, and workflows relevant to the user's learning goals.",
+  "nodes": [
+    {
+      "id": "Master_Orchestrator",
+      "type": "CoreAgent",
+      "description": "The central nervous system for the distributed multi-agent environment. Coordinates sub-agents, maintains state continuity, and self-evolves.",
+      "tags": ["core", "identity", "hyperagent"],
+      "priority": "P0",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "MCP_Servers",
+      "type": "Technology",
+      "description": "Model Context Protocol — the emerging standard for extending agent capabilities with external tools and data sources.",
+      "tags": ["infrastructure", "agent-tooling"],
+      "priority": "P1",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "Prompt_Engineering",
+      "type": "Skill",
+      "description": "The practice of designing effective prompts to guide LLM behavior, including system prompts, few-shot examples, and chain-of-thought.",
+      "tags": ["foundational", "skill"],
+      "priority": "P0",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "Context_Engineering",
+      "type": "Skill",
+      "description": "The discipline of managing what information an AI agent sees, including AGENTS.md, memory layers, and retrieval strategies.",
+      "tags": ["foundational", "skill", "2026-trend"],
+      "priority": "P0",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "Agentic_Workflows",
+      "type": "Concept",
+      "description": "Multi-step AI workflows where agents plan, execute, and self-correct autonomously (e.g., Claude Code, Codex, Devin).",
+      "tags": ["architecture", "trending"],
+      "priority": "P1",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "Vector_Databases",
+      "type": "Technology",
+      "description": "Databases optimized for storing and querying high-dimensional embeddings for similarity search (e.g., Pinecone, ChromaDB, FAISS).",
+      "tags": ["infrastructure", "RAG"],
+      "priority": "P1",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "RAG",
+      "type": "Concept",
+      "description": "Retrieval-Augmented Generation — combining LLM reasoning with external knowledge retrieval to reduce hallucination.",
+      "tags": ["architecture", "foundational"],
+      "priority": "P0",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "Fine_Tuning",
+      "type": "Technique",
+      "description": "Customizing pre-trained LLMs on domain-specific data to improve task performance.",
+      "tags": ["training", "advanced"],
+      "priority": "P1",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "Code_Generation",
+      "type": "Capability",
+      "description": "Using LLMs to generate, refactor, and debug code autonomously.",
+      "tags": ["core-use-case", "productivity"],
+      "priority": "P0",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "ETS_Hierarchy",
+      "type": "Methodology",
+      "description": "Epic → Task → SubTask decomposition pattern for managing complex projects. Prevents planning drift and ensures auditable progress.",
+      "tags": ["project-management", "orchestration", "methodology"],
+      "priority": "P0",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "Memory_Bank",
+      "type": "Architecture",
+      "description": "Six-file project state management layer (projectbrief, productContext, systemPatterns, techContext, progress, activeContext) for cross-device continuity.",
+      "tags": ["infrastructure", "state-management", "continuity"],
+      "priority": "P0",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "Sub_Agent_Delegation",
+      "type": "Pattern",
+      "description": "Dispatching specialized sub-agents (@Research-Agent, @Code-Generator, @Peer-Reviewer, etc.) with strict mandates to optimize token consumption.",
+      "tags": ["orchestration", "multi-agent", "token-optimization"],
+      "priority": "P0",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "Adversarial_Peer_Review",
+      "type": "QualityGate",
+      "description": "Spawning a contrarian critic agent to actively break and find flaws in proposed solutions before acceptance.",
+      "tags": ["verification", "quality", "anti-sycophancy"],
+      "priority": "P0",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "Agentic_Tree_Search",
+      "type": "Technique",
+      "description": "Generating multiple candidate solutions in parallel, testing each branch, and pruning failures — inspired by Monte Carlo Tree Search applied to coding workflows.",
+      "tags": ["execution", "parallel", "optimization"],
+      "priority": "P1",
+      "created_at": "2026-05-09"
+    },
+    {
+      "id": "Meta_Prompting",
+      "type": "Technique",
+      "description": "The agent dynamically generating and optimizing its own prompts and system instructions for task-specific peak performance.",
+      "tags": ["self-evolution", "hyperagent", "advanced"],
+      "priority": "P1",
+      "created_at": "2026-05-09"
+    }
+  ],
+  "edges": [
+    {
+      "source": "Master_Orchestrator",
+      "target": "MCP_Servers",
+      "relation": "utilizes",
+      "description": "The orchestrator uses MCP servers to interact with external data sources and tools.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Master_Orchestrator",
+      "target": "Prompt_Engineering",
+      "relation": "teaches",
+      "description": "A core skill the agent teaches the user.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Master_Orchestrator",
+      "target": "Context_Engineering",
+      "relation": "teaches",
+      "description": "Context engineering is the meta-skill for effective agent usage.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Master_Orchestrator",
+      "target": "Sub_Agent_Delegation",
+      "relation": "executes_via",
+      "description": "The orchestrator delegates complex tasks to specialized sub-agents to optimize token usage.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Master_Orchestrator",
+      "target": "ETS_Hierarchy",
+      "relation": "decomposes_with",
+      "description": "All projects are decomposed using Epic → Task → SubTask before execution.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Master_Orchestrator",
+      "target": "Memory_Bank",
+      "relation": "persists_state_to",
+      "description": "The orchestrator reads/writes project state to the Memory Bank for cross-device continuity.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Master_Orchestrator",
+      "target": "Meta_Prompting",
+      "relation": "self_optimizes_via",
+      "description": "The orchestrator is authorized to rewrite its own logic using meta-prompting for peak efficiency.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Prompt_Engineering",
+      "target": "Context_Engineering",
+      "relation": "evolved_into",
+      "description": "Context engineering is the 2026 evolution of prompt engineering.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "RAG",
+      "target": "Vector_Databases",
+      "relation": "depends_on",
+      "description": "RAG requires a vector database or similar retrieval layer.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Agentic_Workflows",
+      "target": "MCP_Servers",
+      "relation": "depends_on",
+      "description": "Agentic workflows use MCP for tool integration and external data access.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Agentic_Workflows",
+      "target": "Context_Engineering",
+      "relation": "requires",
+      "description": "Effective agentic workflows require careful context engineering.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Code_Generation",
+      "target": "Agentic_Workflows",
+      "relation": "enabled_by",
+      "description": "AI code generation is most powerful when embedded in agentic workflows.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Code_Generation",
+      "target": "Fine_Tuning",
+      "relation": "enhanced_by",
+      "description": "Fine-tuning on domain-specific codebases improves code generation quality.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Sub_Agent_Delegation",
+      "target": "Adversarial_Peer_Review",
+      "relation": "includes",
+      "description": "The @Peer-Reviewer is a specialized sub-agent used in the adversarial review step.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "ETS_Hierarchy",
+      "target": "Agentic_Tree_Search",
+      "relation": "executed_via",
+      "description": "ETS tasks are executed using agentic tree search to explore multiple candidate solutions.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Agentic_Tree_Search",
+      "target": "Adversarial_Peer_Review",
+      "relation": "validated_by",
+      "description": "Candidate solutions from tree search are validated by adversarial peer review before acceptance.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Memory_Bank",
+      "target": "ETS_Hierarchy",
+      "relation": "tracks_state_of",
+      "description": "activeContext.md stores the active ETS hierarchy; progress.md logs completed ETS milestones.",
+      "created_at": "2026-05-09"
+    },
+    {
+      "source": "Meta_Prompting",
+      "target": "Agentic_Workflows",
+      "relation": "optimizes",
+      "description": "Meta-prompting enables dynamic optimization of agentic workflow configurations.",
+      "created_at": "2026-05-09"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+# Lock files (concurrent write protection)
+*.lock
+
+# Temporary files (atomic write pattern)
+*.tmp
+*.bak
+
+# Vector embeddings (regenerable, large binary)
+VectorRAG/**/*.bin
+VectorRAG/**/*.pkl
+VectorRAG/**/*.faiss
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/

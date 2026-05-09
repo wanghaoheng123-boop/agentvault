@@ -1,0 +1,15 @@
+# Cursor-Specific Overrides
+# For universal agent instructions, see AGENTS.md (the source of truth).
+# This file contains ONLY Cursor-specific behavior that differs from the universal standard.
+
+# Import universal rules
+# Cursor automatically reads .cursorrules. The instructions below supplement AGENTS.md.
+
+## Cursor-Specific Behavior
+- When using Cursor's Composer, prefer multi-file edits over sequential single-file changes.
+- Use Cursor's @-mentions to reference specific files from the memory architecture when context is needed.
+- When Cursor's AI suggests a change that conflicts with OpenViking L0/L1 rules, always defer to the rules.
+- Use Cursor's "Rules for AI" feature in `.cursor/rules/` for file-type-specific overrides if needed.
+
+## Memory Protocol Reminder
+Before any action, read `AGENTS.md` for the full Mandatory Memory Architecture Protocol.
