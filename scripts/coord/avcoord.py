@@ -972,6 +972,7 @@ DEFAULT_CONTESTED_PREFIXES = (
     "MemoryBank/CURRENT.md",
     "MemoryBank/coord/next_ids.json",
     "MemoryBank/coord/contested.json",
+    "MemoryBank/coord/EXECUTION_GATES.md",
     "EpisodicTracker/state_tracker.json",
     "GraphRAG/schema.json",
     "VectorRAG/index.json",
@@ -983,6 +984,7 @@ DEFAULT_CONTESTED_BARE_NAMES = (
     "CURRENT.md",
     "next_ids.json",
     "contested.json",
+    "EXECUTION_GATES.md",
     "state_tracker.json",
     "schema.json",
     "index.json",
@@ -1382,6 +1384,82 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 1 if doctor_issues else 0
 
 
+def _redact_secrets(text: str) -> str:
+    """Strip common secret patterns before persisting handoff notes."""
+    patterns = [
+        (re.compile(r"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*\S+"), r"\1=<REDACTED>"),
+        (re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"), "sk-<REDACTED>"),
+        (re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+\b"), "Bearer <REDACTED>"),
+        (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "<GITHUB_TOKEN_REDACTED>"),
+        (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "<AWS_KEY_REDACTED>"),
+        (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "<SLACK_TOKEN_REDACTED>"),
+        (re.compile(r"\bAIza[0-9A-Za-z\-_]{20,}\b"), "<GOOGLE_API_KEY_REDACTED>"),
+        (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+         "<PEM_REDACTED>"),
+        (re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+         "<JWT_REDACTED>"),
+        (re.compile(r"/Users/[A-Za-z0-9_.-]+"), "/Users/<REDACTED>"),
+        (re.compile(r"/home/[A-Za-z0-9_.-]+"), "/home/<REDACTED>"),
+        (re.compile(r"(?i)C:\\Users\\[A-Za-z0-9_.-]+"), r"C:\\Users\\<REDACTED>"),
+    ]
+    out = text
+    for pat, repl in patterns:
+        out = pat.sub(repl, out)
+    return out
+
+
+def cmd_checkpoint(args: argparse.Namespace) -> int:
+    """Sanitize and flush a 4-vector handoff into MemoryBank/sessions/.
+
+    Does not replace CURRENT.md. Vectors: Active Goal, Ground-Truth Status,
+    Exact File & Line, Exact Next Shell/Edit.
+    """
+    if not validate_agent(args.agent):
+        return 1
+    sessions = MB / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    stamp = now().strftime("%Y%m%dT%H%M%S%z")
+    sid = extract_frontmatter_field(CURRENT.read_text(encoding="utf-8"), "session_id") if CURRENT.exists() else None
+    sid = sid or "unknown"
+    goal = _redact_secrets(getattr(args, "goal", None) or args.notes or "")
+    status = _redact_secrets(getattr(args, "status", None) or "")
+    file_path = _redact_secrets(args.file or "")
+    line = args.line
+    next_action = _redact_secrets(
+        getattr(args, "next", None) or args.remaining or args.blockers or ""
+    )
+    blockers = _redact_secrets(args.blockers or "")
+    body = (
+        f"---\n"
+        f"type: handoff_checkpoint\n"
+        f"schema: four_vector_v1\n"
+        f"created_at: {iso()}\n"
+        f"agent: {args.agent}\n"
+        f"session_id: {sid}\n"
+        f"authority: none\n"
+        f"---\n\n"
+        f"# Handoff checkpoint\n\n"
+        f"**Session:** `{sid}` · **Agent:** `{args.agent}`\n\n"
+        f"## 1. Active Goal\n\n{goal or '_empty_'}\n\n"
+        f"## 2. Ground-Truth Status\n\n"
+        f"{status or '_unknown — run bin/avcoord gate_'}\n\n"
+        f"## 3. Exact File & Line\n\n"
+        f"`{file_path or '(none)'}`"
+        f"{f':{line}' if line is not None else ''}\n\n"
+        f"## 4. Exact Next Shell/Edit\n\n{next_action or '_none_'}\n\n"
+        f"## Blockers\n\n{blockers or '_none_'}\n\n"
+        f"## Boot for next model\n\n"
+        f"1. `AGENTS.md` → `CURRENT.md` → `board.md`\n"
+        f"2. This handoff (4-vector)\n"
+        f"3. Chat is not SSOT\n"
+    )
+    out = sessions / f"handoff-{stamp}.md"
+    atomic_write_text(out, body)
+    audit("checkpoint", agent=args.agent, path=str(out.relative_to(ROOT)), session_id=sid)
+    print(json.dumps({"ok": True, "path": str(out.relative_to(ROOT)), "session_id": sid}, indent=2))
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues: list[str] = []
     warns: list[str] = []
@@ -1396,6 +1474,36 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "DUAL_SSOT: workspace/SESSION_STATE.json exists — AgentVault MemoryBank is the only SSOT; "
             "do not treat AGENT HOOK state as co-equal"
         )
+    nested = ROOT / ".agentvault" / "MemoryBank"
+    if nested.exists():
+        issues.append(
+            "DUAL_SSOT: .agentvault/MemoryBank exists — nest rejected (ADR-003); "
+            "MemoryBank at project root is the only SSOT"
+        )
+    active_ssot = MB / "active"
+    if active_ssot.exists():
+        issues.append(
+            "DUAL_SSOT: MemoryBank/active/ exists — rejected (ADR-003/005); "
+            "use coord/specs/ for optional elevated notes only"
+        )
+
+    gates = COORD / "EXECUTION_GATES.md"
+    if not gates.exists():
+        issues.append("MISSING MemoryBank/coord/EXECUTION_GATES.md")
+    else:
+        gtext = gates.read_text(encoding="utf-8")
+        for heading in ("Elevate", "Done means exit 0", "Handoff", "Monotonic rigor"):
+            if heading not in gtext:
+                issues.append(f"GATES_SECTION_MISSING: {heading}")
+
+    if (COORD / "COGNITIVE_KERNEL.md").exists():
+        warns.append(
+            "legacy MemoryBank/coord/COGNITIVE_KERNEL.md present — prefer EXECUTION_GATES.md (ADR-005)"
+        )
+
+    reviews_readme = COORD / "reviews" / "README.md"
+    if not reviews_readme.exists():
+        warns.append("MemoryBank/coord/reviews/README.md missing (non-fatal)")
 
     age = current_age_hours()
     stale_h = STALE_HOURS_DEFAULT
@@ -1430,6 +1538,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # Health checks are read-only: reaping moved to `avcoord reap` and cmd_claim.
 
+    # Ghost leases: live lease on a missing concrete path → FAIL (ADR-007)
+    for L in read_live_leases():
+        for res in L.get("resources") or []:
+            if not isinstance(res, str):
+                continue
+            raw = res.strip()
+            if not raw or "*" in raw:
+                continue  # globs may name future trees
+            check = raw.rstrip("/")
+            if not (ROOT / check).exists():
+                issues.append(
+                    f"GHOST_LEASE: {raw} (missing path; agent={L.get('agent_id')})"
+                )
+
+    # CURRENT pointer budget (WARN only — ADR-007)
+    CURRENT_WORD_BUDGET = 112
+    if CURRENT.exists():
+        try:
+            cur_words = len(CURRENT.read_text(encoding="utf-8").split())
+            if cur_words > CURRENT_WORD_BUDGET:
+                warns.append(
+                    f"CURRENT_WORD_BUDGET: {cur_words} words > {CURRENT_WORD_BUDGET} (ADR-007 pointer)"
+                )
+        except OSError:
+            pass
+
     # Mail backlog warning (hygiene, non-fatal)
     if MAIL.exists():
         cur_total = 0
@@ -1440,11 +1574,148 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if cur_total > MAIL_CUR_WARN:
             warns.append(f"mail cur backlog={cur_total} (threshold {MAIL_CUR_WARN})")
 
+    # Two-hop navigation (lab contract). Failures are issues when WORKSPACE_INDEX exists.
+    nav_script = ROOT / "scripts" / "nav" / "check_links.py"
+    if (ROOT / "WORKSPACE_INDEX.md").exists() and nav_script.exists():
+        try:
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location("_av_nav_check", nav_script)
+            mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
+            nav = mod.check(ROOT)
+            h1b = len(nav.get("hop1", {}).get("broken") or [])
+            h2b = len(nav.get("hop2", {}).get("broken") or [])
+            miss = nav.get("missing_mentions") or []
+            if not nav.get("ok"):
+                issues.append(
+                    f"NAV_LINKS: hop1_broken={h1b} hop2_broken={h2b} "
+                    f"missing_mentions={miss or []}"
+                )
+            else:
+                warns.append(
+                    f"nav links ok (hop1={nav['hop1']['total']} hop2={nav['hop2']['total']})"
+                )
+            for w in (nav.get("warnings") or [])[:5]:
+                warns.append(f"nav: {w}")
+        except Exception as e:
+            warns.append(f"nav check skipped: {e}")
+
     status = "FAIL" if issues else "PASS"
     report = {"status": status, "issues": issues, "warnings": warns, "ts": iso()}
     print(json.dumps(report, indent=2))
     audit("doctor", status=status, issues=issues)
     return 1 if issues else 0
+
+
+def cmd_gate(args: argparse.Namespace) -> int:
+    """Deterministic DONE gate: doctor + pytest + nav + compileall + import-resolve.
+
+    This is not `verify` (CURRENT freshness stamp). Conversational COMPLETED is invalid
+    unless this command exits 0.
+    """
+    paths = [str(p) for p in (getattr(args, "paths", None) or [])]
+    full = bool(getattr(args, "full", False))
+    force_nav = bool(getattr(args, "nav", False))
+    results: list[dict[str, Any]] = []
+
+    drc = cmd_doctor(args)
+    results.append({"step": "doctor", "rc": drc})
+    if drc != 0:
+        print(json.dumps({"ok": False, "results": results}, indent=2))
+        audit("gate", ok=False, results=results)
+        return 1
+
+    test_roots = [ROOT / "scripts" / "coord" / "tests"]
+    if full or not paths or any("aeap" in p.replace("\\", "/") for p in paths):
+        test_roots.append(ROOT / "aeap" / "tests")
+
+    for tr in test_roots:
+        if not tr.is_dir():
+            continue
+        r = subprocess.run(
+            [sys.executable, "-m", "pytest", str(tr), "-q", "--tb=line"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+        )
+        tail = [ln for ln in (r.stdout or "").splitlines() if ln.strip()][-1:] or [""]
+        results.append({"step": f"pytest:{tr.relative_to(ROOT)}", "rc": r.returncode, "tail": tail[0]})
+        if r.returncode != 0:
+            print(r.stdout)
+            print(r.stderr, file=sys.stderr)
+            print(json.dumps({"ok": False, "results": results}, indent=2))
+            audit("gate", ok=False, results=results)
+            return 1
+
+    nav = ROOT / "scripts" / "nav" / "check_links.py"
+    if (force_nav or (ROOT / "WORKSPACE_INDEX.md").exists()) and nav.exists() and (ROOT / "WORKSPACE_INDEX.md").exists():
+        nr = subprocess.run(
+            [sys.executable, str(nav)], cwd=str(ROOT), capture_output=True, text=True
+        )
+        results.append({"step": "nav", "rc": nr.returncode})
+        if nr.returncode != 0:
+            print(nr.stdout)
+            print(nr.stderr, file=sys.stderr)
+            print(json.dumps({"ok": False, "results": results}, indent=2))
+            audit("gate", ok=False, results=results)
+            return 1
+
+    compile_roots: list[Path] = []
+    if paths:
+        for p in paths:
+            if "aeap" in p.replace("\\", "/"):
+                compile_roots.append(ROOT / "aeap")
+            if "scripts/coord" in p.replace("\\", "/"):
+                compile_roots.append(ROOT / "scripts" / "coord")
+            pp = ROOT / p
+            if pp.suffix == ".py" and pp.exists():
+                compile_roots.append(pp.parent)
+    else:
+        compile_roots.extend([ROOT / "scripts" / "coord", ROOT / "aeap"])
+    seen: set[Path] = set()
+    for cr in compile_roots:
+        rp = cr.resolve()
+        if rp in seen or not rp.exists():
+            continue
+        seen.add(rp)
+        r = subprocess.run(
+            [sys.executable, "-m", "compileall", "-q", str(rp)],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+        )
+        rel = str(rp.relative_to(ROOT)) if ROOT in rp.parents or rp == ROOT.resolve() else rp.name
+        results.append({"step": f"compileall:{rel}", "rc": r.returncode})
+        if r.returncode != 0:
+            print(r.stdout)
+            print(r.stderr, file=sys.stderr)
+            print(json.dumps({"ok": False, "results": results}, indent=2))
+            audit("gate", ok=False, results=results)
+            return 1
+
+    # AST import resolve (compileall ≠ resolve — catch hallucinated top-level imports)
+    import_resolve = ROOT / "scripts" / "eval" / "import_resolve.py"
+    if import_resolve.is_file() and seen:
+        ir_args = [sys.executable, str(import_resolve)]
+        for rp in seen:
+            try:
+                ir_args.append(str(rp.relative_to(ROOT)))
+            except ValueError:
+                ir_args.append(str(rp))
+        ir = subprocess.run(ir_args, cwd=str(ROOT), capture_output=True, text=True)
+        results.append({"step": "import_resolve", "rc": ir.returncode})
+        if ir.returncode != 0:
+            print(ir.stdout)
+            print(ir.stderr, file=sys.stderr)
+            print(json.dumps({"ok": False, "results": results}, indent=2))
+            audit("gate", ok=False, results=results)
+            return 1
+
+    print(json.dumps({"ok": True, "results": results}, indent=2))
+    audit("gate", ok=True, results=results)
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1483,6 +1754,20 @@ def _init_sandbox(sandbox: Path) -> None:
     # PROTOCOL stub (doctor requires it)
     (sandbox / "MemoryBank/coord/PROTOCOL.md").write_text(
         "# PROTOCOL\nMemoryBank/coord/PROTOCOL.md\n", encoding="utf-8"
+    )
+    (sandbox / "MemoryBank/coord/EXECUTION_GATES.md").write_text(
+        "# EXECUTION GATES\n"
+        "## Elevate\n"
+        "## Done means exit 0\n"
+        "## Review without theater\n"
+        "## Handoff (4-vector)\n"
+        "## Monotonic rigor\n",
+        encoding="utf-8",
+    )
+    (sandbox / "MemoryBank/coord/specs").mkdir(parents=True, exist_ok=True)
+    (sandbox / "MemoryBank/coord/reviews").mkdir(parents=True, exist_ok=True)
+    (sandbox / "MemoryBank/coord/reviews/README.md").write_text(
+        "# reviews\n", encoding="utf-8"
     )
     atomic_write_json(
         sandbox / "MemoryBank/coord/next_ids.json",
@@ -2080,16 +2365,46 @@ def build_parser() -> argparse.ArgumentParser:
     ref.add_argument("--agent", default="orchestrator")
     ref.add_argument("--run", default=None)
 
-    ver = sub.add_parser("verify", help="Record substantive verification of CURRENT (requires a lease)")
+    ver = sub.add_parser(
+        "verify",
+        help="Stamp CURRENT last_verified_at (requires lease). NOT a test runner — use `gate`.",
+    )
     ver.add_argument("--agent", required=True)
     ver.add_argument("--run", default=None)
     ver.add_argument("--note", required=True, help="What was actually checked")
     ref.add_argument("--session", default="")
 
+    cp = sub.add_parser(
+        "checkpoint",
+        help="Sanitize 4-vector handoff under MemoryBank/sessions/",
+    )
+    cp.add_argument("--agent", required=True)
+    cp.add_argument("--notes", default="", help="Alias for --goal (compat)")
+    cp.add_argument("--goal", default="", help="1. Active Goal")
+    cp.add_argument("--status", default="", help="2. Ground-Truth Status (e.g. gate PASS)")
+    cp.add_argument("--file", default="", help="3. Exact file path")
+    cp.add_argument("--line", type=int, default=None, help="3. Exact line")
+    cp.add_argument("--next", dest="next", default="", help="4. Exact next shell/edit")
+    cp.add_argument("--blockers", default="", help="Open blockers")
+    cp.add_argument("--remaining", default="", help="Alias for --next (compat)")
+
+    gate = sub.add_parser(
+        "gate",
+        help="Deterministic DONE check: doctor + pytest + nav/compileall/import-resolve (verify ≠ gate)",
+    )
+    gate.add_argument("--full", action="store_true", help="Always run aeap/tests too")
+    gate.add_argument("--nav", action="store_true", help="Force nav link check")
+    gate.add_argument(
+        "--paths",
+        action="append",
+        default=[],
+        help="Touched paths (repeatable); aeap/ prefix pulls aeap tests; used for compileall",
+    )
+
     st = sub.add_parser("status", help="Glance dashboard (CURRENT, leases, mail, threads)")
     st.add_argument("--json", action="store_true", dest="json")
 
-    sub.add_parser("doctor", help="Health check (STALE, dual-SSOT, JSON)")
+    sub.add_parser("doctor", help="Health check (STALE, dual-SSOT, gates, JSON, nav links)")
 
     t = sub.add_parser("test", help="Sandboxed smoke; --trail adds full matrix")
     t.add_argument("--smoke", action="store_true", help="Run A–F smoke (always run)")
@@ -2445,6 +2760,8 @@ def main(argv: list[str] | None = None) -> int:
         "cutover": cmd_cutover,
         "run": lambda a: cmd_run_start(a) if a.run_cmd == "start" else cmd_run_list(a),
         "verify": cmd_verify,
+        "checkpoint": cmd_checkpoint,
+        "gate": cmd_gate,
         "init": cmd_init,
         "rotate-events": cmd_rotate_events,
     }

@@ -1,11 +1,12 @@
 {
   "schema_version": "1.0",
-  "last_updated": "2026-09-05T14:36:11+08:00",
+  "last_updated": "2026-09-07T23:10:00+08:00",
   "description": "Edit prefixes for your project's multi-writer hot paths.",
   "prefixes": [
     "MemoryBank/CURRENT.md",
     "MemoryBank/coord/next_ids.json",
     "MemoryBank/coord/contested.json",
+    "MemoryBank/coord/COGNITIVE_KERNEL.md",
     "EpisodicTracker/state_tracker.json",
     "GraphRAG/schema.json",
     "VectorRAG/index.json",
@@ -16,6 +17,7 @@
     "CURRENT.md",
     "next_ids.json",
     "contested.json",
+    "COGNITIVE_KERNEL.md",
     "state_tracker.json",
     "schema.json",
     "index.json",

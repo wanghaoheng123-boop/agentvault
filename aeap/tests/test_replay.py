@@ -55,7 +55,20 @@ def test_every_result_carries_the_vintage_and_data_caveats(result):
     assert result["data_status"] == "SYNTHETIC_NOT_PIT"
 
 
-def test_replay_writes_only_inside_its_fixture_root(result, tmp_path_factory):
-    root = pathlib.Path(result["fixture_root"])
+def test_replay_writes_only_inside_its_fixture_root(result):
+    """Replay must never deposit a factor object in the production library.
+
+    The previous form was `assert ... if prod_lib.exists() else True`, which short-circuited
+    to True whenever the directory was absent — and it always was, because git does not
+    track empty directories. The test passed by checking nothing. Adding a .gitkeep to the
+    scaffold made the directory real and exposed that.
+
+    Now it asserts the substance in both cases: no factor object, scaffold placeholder or
+    not, and zero production admissions on the result itself.
+    """
     prod_lib = pathlib.Path("aeap/library/objects")
-    assert not any(prod_lib.glob("*")) if prod_lib.exists() else True
+    leaked = ([p for p in prod_lib.glob("*") if p.name != ".gitkeep"]
+              if prod_lib.exists() else [])
+    assert leaked == [], f"replay leaked factor objects into the production library: {leaked}"
+    assert result["production_admissions"] == 0
+    assert result["can_promote_production_membership"] is False
