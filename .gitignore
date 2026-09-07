@@ -1,0 +1,22 @@
+*.lock
+*.tmp
+*.bak
+.DS_Store
+.vscode/
+.idea/
+venv/
+__pycache__/
+workspace/SESSION_STATE.json
+workspace/MEMORY_LOG.md
+workspace/USAGE_MONITOR.json
+VectorRAG/**/*.bin
+VectorRAG/**/*.pkl
+VectorRAG/**/*.faiss
+EpisodicTracker/state_tracker.json
+
+# Build artifacts. .pyc files embed the ABSOLUTE SOURCE PATH of the
+# machine that compiled them, so they must never be published.
+*.pyc
+.pytest_cache/
+*.pyo
+*.egg-info/

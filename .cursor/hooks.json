@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": ".cursor/hooks/avcoord-lease-check.py",
+        "matcher": "Write|StrReplace|EditNotebook|Delete",
+        "failClosed": false,
+        "timeout": 15
+      }
+    ]
+  }
+}

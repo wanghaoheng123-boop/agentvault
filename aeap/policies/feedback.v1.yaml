@@ -1,0 +1,26 @@
+# Adaptive search / feedback policy v1 — RFC §6.
+# A statistical threshold copied from one paper is not universal error control. Validation
+# feedback becomes development information, so every exposure is metered and logged.
+schema_version: "1.0"
+policy_id: feedback.v1
+status: ACTIVE
+
+trial_ledger:
+  record: [candidate, mutation, repair, policy_variant, feedback_exposure]
+  failed_and_rejected_trials_retained: true
+  deletion: forbidden
+
+development_feedback:
+  permitted_fields: [gate_status, blocking_reasons]
+  forbidden_fields: [final_test_estimates, final_test_returns, held_out_labels]
+  max_exposures_per_candidate: 3
+
+final_process_test:
+  sealed_until: campaign_close
+  opening_is_irreversible: true
+  after_opening: "further tuning belongs to a NEW campaign and a NEW test period"
+  labels_never_reach_generation: true
+
+multiplicity:
+  method: bonferroni_over_campaign_budget
+  note: "controls the family of preregistered trials only; it does not correct for adaptive reuse"

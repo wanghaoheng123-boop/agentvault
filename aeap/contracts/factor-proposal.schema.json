@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aeap/contracts/factor-proposal.schema.json",
+  "title": "Frozen factor proposal (B1 output, B2 input)",
+  "description": "Exactly three nonempty author fields. Every other field is attached by the trusted envelope, never by the generating model.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "rationale",
+    "formula",
+    "trace",
+    "expected_sign",
+    "author_run_id",
+    "campaign_id",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "candidate_id": {
+      "type": "string",
+      "pattern": "^CAND-[0-9a-f]{12}$"
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 40,
+      "description": "Economic mechanism, expected direction, falsifiable kill condition, epistemic status"
+    },
+    "formula": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "description": "Deterministic symbolic expression over declared operators and features only"
+    },
+    "trace": {
+      "type": "string",
+      "minLength": 40,
+      "description": "Source/artifact ids, operator units, temporal availability, difference from known factors"
+    },
+    "expected_sign": {
+      "enum": [
+        1,
+        -1
+      ],
+      "description": "Preregistered orientation. Changing it creates a NEW candidate and debits budget."
+    },
+    "author_run_id": {
+      "type": "string"
+    },
+    "campaign_id": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parent_candidate_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mutation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repair_of": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "declared_features": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    }
+  }
+}

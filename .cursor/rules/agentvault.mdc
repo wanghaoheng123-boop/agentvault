@@ -1,0 +1,9 @@
+---
+description: AgentVault — follow AGENTS.md Boot exactly
+globs: ["**/*"]
+alwaysApply: true
+---
+
+Follow `AGENTS.md` Boot exactly. Do not invent a shorter boot.
+Use `MemoryBank/CURRENT.md` + `board.md` (or `avcoord status`). On write/multi-agent, skim `MemoryBank/coord/PROTOCOL.quick.md` and claim contested paths.
+AgentVault MemoryBank is the only SSOT — do not create `workspace/SESSION_STATE.json`.

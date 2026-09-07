@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# AgentVault: block commits that touch contested paths without a live lease.
+# Enable once: git config core.hooksPath .githooks
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+CLI="$ROOT/scripts/coord/avcoord.py"
+AGENT="${AVCOORD_AGENT:-orchestrator}"
+
+if [[ ! -f "$CLI" ]]; then
+  exit 0
+fi
+
+fail=0
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  set +e
+  out="$(python3 "$CLI" check-lease --agent "$AGENT" --path "$f" 2>&1)"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    echo "avcoord pre-commit: contested path lacks live lease for $AGENT: $f" >&2
+    echo "  $out" >&2
+    echo "  Fix: bin/avcoord claim --agent $AGENT --resource $f" >&2
+    fail=1
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACMRD)
+
+exit "$fail"

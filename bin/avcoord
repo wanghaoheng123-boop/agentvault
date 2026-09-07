@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Shim for AgentVault coordination CLI
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+exec python3 "$ROOT/scripts/coord/avcoord.py" "$@"

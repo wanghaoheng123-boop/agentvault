@@ -1,0 +1,6 @@
+{
+  "schema_version": "1.0",
+  "epoch": 1,
+  "authority": "legacy",
+  "notes": "Fresh installs start on legacy authority. The control journal under coord/commits/ is staged and inactive until an explicit cutover."
+}

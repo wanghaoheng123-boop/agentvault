@@ -1,0 +1,42 @@
+# Execution isolation policy v1 — RFC §6.
+#
+# HONEST LIMIT, and the reason admission is disabled: this profile is enforced by a
+# subprocess with rlimits and a scrubbed environment. That contains accidents and
+# resource exhaustion. It is NOT an OS security boundary against a hostile generator
+# sharing the same uid, and AST filtering is not one either. Strict evaluation and
+# admission require a protected worker whose capabilities are inaccessible to ordinary
+# agent tools; that does not exist here.
+schema_version: "1.0"
+policy_id: sandbox.v1
+status: ACTIVE
+is_security_boundary: false
+enforced_by: subprocess_rlimit_and_scrubbed_env
+
+limits:
+  cpu_seconds: 20
+  memory_bytes: 1073741824      # 1 GiB
+  wall_seconds: 60
+  max_output_rows: 5000000
+  max_processes: 1
+
+deny:
+  network: true
+  credentials: true
+  label_columns: true
+  writes_outside_output_mount: true
+
+mounts:
+  code: read_only
+  features: read_only
+  output: private_bounded
+
+output_validation:
+  schema: [asset, date, value]
+  key_uniqueness: [asset, date]
+  ordering: sorted_by_asset_then_date
+  inputs_unchanged_after_run: true
+  record_output_sha256: true
+
+invariance_test:
+  description: "append or modify FUTURE rows and require historical scores to be bit-identical"
+  required_before_admission: true

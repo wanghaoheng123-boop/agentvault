@@ -1,0 +1,5 @@
+# Cursor overrides (Composer only)
+
+- Prefer multi-file edits over sequential single-file changes.
+- On OpenViking L0/L1 conflict, defer to OpenViking.
+- Always-on AgentVault boot lives in `.cursor/rules/agentvault.mdc` and `AGENTS.md` — do not duplicate a second boot list here.
