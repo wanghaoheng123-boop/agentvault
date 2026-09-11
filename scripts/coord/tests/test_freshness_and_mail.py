@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+from datetime import datetime, timedelta
 
-from conftest import claim, ns
+from conftest import TZ, claim, ns
 
 
 # ---------------------------------------------------------------- frontmatter scoping
@@ -33,8 +35,9 @@ def test_prose_complete_does_not_change_thread_state(av):
         ],
     }
     (av.COORD / "threads.json").write_text(json.dumps(threads, indent=2))
+    fresh = (datetime.now(TZ) - timedelta(hours=1)).isoformat(timespec="seconds")
     av.CURRENT.write_text(
-        "---\nversion: 1.0\nlast_updated: 2026-09-06T21:00:00+08:00\nsession_id: sess-test\n"
+        f"---\nversion: 1.0\nlast_updated: {fresh}\nsession_id: sess-test\n"
         "stale_after_hours: 48\n---\n\n"
         "# CURRENT\n\n"
         "Do not mark the task `COMPLETE` until peer review lands.\n"
@@ -209,3 +212,40 @@ def test_refs_carry_content_hashes(av, capsys):
 
 def test_missing_parent_is_rejected(av):
     assert _post(av, parent="MSG-DOES-NOT-EXIST") == 1
+
+
+def test_duplicate_ack_returns_one_immutable_effect_receipt(av, capsys):
+    _post(av, summary="ack once")
+    message = json.loads(capsys.readouterr().out)
+    assert av.cmd_recv(ns(agent="code_generator", full=False, resume=False)) == 0
+    capsys.readouterr()
+    assert av.cmd_ack(ns(agent="code_generator", msg=message["id"])) == 0
+    first = json.loads(capsys.readouterr().out)
+    receipt_path = av.MAIL / "code_generator" / "receipts" / f"{message['id']}.json"
+    before = receipt_path.read_bytes()
+
+    assert av.cmd_ack(ns(agent="code_generator", msg=message["id"])) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["status"] == "duplicate"
+    assert second["receipt"] == first["receipt"]
+    assert receipt_path.read_bytes() == before
+    assert len(list(receipt_path.parent.glob(f"{message['id']}*.json"))) == 1
+
+
+def test_ack_recovers_after_message_reached_done_before_receipt(av, capsys):
+    _post(av, summary="crash boundary")
+    message = json.loads(capsys.readouterr().out)
+    assert av.cmd_recv(ns(agent="code_generator", full=False, resume=False)) == 0
+    capsys.readouterr()
+    src = av.MAIL / "code_generator" / "cur" / f"{message['id']}.json"
+    data = json.loads(src.read_text())
+    data.update(status="acked", acked_at="2026-09-10T00:00:00+08:00")
+    src.write_text(json.dumps(data, indent=2) + "\n")
+    done = av.MAIL / "code_generator" / "done" / src.name
+    os.replace(src, done)
+
+    assert av.cmd_ack(ns(agent="code_generator", msg=message["id"])) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "duplicate"
+    assert result["receipt"]["acked_at"] == "2026-09-10T00:00:00+08:00"
+    assert (av.MAIL / "code_generator" / "receipts" / src.name).is_file()

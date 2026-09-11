@@ -1,5 +1,6 @@
 """RFC T13 (sandbox containment) and T17 (point-in-time availability)."""
 from __future__ import annotations
+import hashlib
 import numpy as np
 import pandas as pd
 import pytest
@@ -28,7 +29,7 @@ def test_labels_are_not_in_the_execution_namespace():
     fx, _, _ = feats()
     scores, m = sandbox.execute("cs_rank(fwd_excess)", fx, candidate_id="C",
                                 executor_run_id="re", firewall_passed=True)
-    assert scores is None and m["status"] == "failed"
+    assert scores is None and m["status"] == "refused"
 
 
 def test_builtins_are_absent_from_the_namespace():
@@ -37,7 +38,45 @@ def test_builtins_are_absent_from_the_namespace():
         scores, m = sandbox.execute(hostile, fx, candidate_id="C",
                                     executor_run_id="re", firewall_passed=True)
         assert scores is None, hostile
-        assert m["status"] == "failed"
+        assert m["status"] == "refused"
+
+
+def test_forged_firewall_flag_cannot_invoke_series_methods(tmp_path, monkeypatch):
+    fx, _, _ = feats()
+    escaped = tmp_path / "executor-must-not-create-this.pkl"
+    called = {"child": False}
+
+    def child_must_not_start(*args, **kwargs):
+        called["child"] = True
+        raise AssertionError("rejected AST reached the child")
+
+    monkeypatch.setattr(sandbox.subprocess, "run", child_must_not_start)
+    expression = f"x.to_pickle({str(escaped)!r})"
+    scores, manifest = sandbox.execute(
+        expression, fx, candidate_id="FORGED", executor_run_id="re",
+        firewall_passed=True,
+    )
+    assert scores is None and manifest["status"] == "refused"
+    assert "executor firewall rejected" in manifest["refusal_reason"]
+    assert not called["child"] and not escaped.exists()
+
+
+def test_executor_does_not_write_bytecode_into_code_tree():
+    fx, _, _ = feats()
+
+    def snapshot():
+        return {
+            str(path.relative_to(sandbox.ENGINE_ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sandbox.ENGINE_ROOT.rglob("*.pyc")
+        }
+
+    before = snapshot()
+    scores, manifest = sandbox.execute(
+        "cs_rank(x)", fx, candidate_id="READONLY-CODE", executor_run_id="re",
+        firewall_passed=True,
+    )
+    assert scores is not None and manifest["status"] == "ok"
+    assert snapshot() == before
 
 
 def test_manifest_never_claims_to_be_a_security_boundary():

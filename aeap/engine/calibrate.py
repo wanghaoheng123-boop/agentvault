@@ -48,7 +48,10 @@ def null_distribution(replications: int, n_dates: int, n_assets: int, horizon: i
         feats, rets, _, _, _ = panels.make_panel(
             n_dates=n_dates, n_assets=n_assets, seed=10_000 + r, signal=0.0, horizon=horizon)
         ic = per_date_ic(feats["x"], rets, min_assets)
-        mean, se, t, n = newey_west(ic.dropna(), lags)
+        # Keep the panel's own trading grid. `.dropna()` compressed unsupported dates out of
+        # the calendar, which turned nonadjacent dates into lag-1 pairs and biased the HAC
+        # thresholds this file freezes. per_date_ic already returns the series on-schedule.
+        mean, se, t, n = newey_west(ic, lags, scheduled_dates=ic.index)
         if np.isfinite(mean):
             abs_ic.append(abs(mean))
         if np.isfinite(t):
@@ -82,7 +85,10 @@ def power_check(signal: float, replications: int, n_dates: int, n_assets: int, h
         feats, rets, _, _, _ = panels.make_panel(
             n_dates=n_dates, n_assets=n_assets, seed=90_000 + r, signal=signal, horizon=horizon)
         ic = per_date_ic(feats["x"], rets, min_assets)
-        mean, se, t, n = newey_west(ic.dropna(), lags)
+        # Keep the panel's own trading grid. `.dropna()` compressed unsupported dates out of
+        # the calendar, which turned nonadjacent dates into lag-1 pairs and biased the HAC
+        # thresholds this file freezes. per_date_ic already returns the series on-schedule.
+        mean, se, t, n = newey_west(ic, lags, scheduled_dates=ic.index)
         if np.isfinite(mean) and np.isfinite(t):
             signs.append(1 if mean > 0 else -1)
             if abs(mean) >= ic_floor and abs(t) >= t_floor:

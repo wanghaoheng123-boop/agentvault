@@ -1,0 +1,6 @@
+schema_version: "1.0"
+compact_every_n: 50
+compact_max_bytes: 2000000
+hydrate_token_budget: 1200
+rebase_max_retries: 8
+reservation_ttl_sec: 120

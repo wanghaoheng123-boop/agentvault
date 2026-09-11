@@ -174,8 +174,16 @@ class CampaignLedger:
             ev = self.events()
             if any(e["kind"] == "final_opened" for e in ev):
                 raise ValueError("final holdout already opened; campaign is permanently sealed")
-            if kind != "final_opened" and any(e["kind"] == "closed" for e in ev):
+            closed = next((e for e in ev if e["kind"] == "closed"), None)
+            final_execution = kind in {"execution", "baseline_execution"} and body.get("purpose") == "final"
+            if closed and kind != "final_opened" and not final_execution:
                 raise ValueError("campaign closed; no further tuning or feedback")
+            if final_execution:
+                if not closed:
+                    raise ValueError("close campaign before final execution")
+                key = "frozen_baseline_hashes" if kind == "baseline_execution" else "frozen_factor_hashes"
+                if body.get("factor_sha256") not in closed["body"].get(key, []):
+                    raise ValueError("final execution factor differs from closed campaign")
             if kind in {"generation", "trial", "feedback", "execution", "baseline_execution"}:
                 limit = {"generation": self.spec.generator_budget, "trial": self.spec.trial_budget,
                          "feedback": self.spec.feedback_budget, "execution": self.spec.execution_budget,
@@ -196,7 +204,7 @@ class CampaignLedger:
                     raise ValueError("unknown trial lineage")
                 if lineage != "candidate" and not parent:
                     raise ValueError("mutations, repairs, and variants require parent trial")
-                if parent and not any(e["kind"] == "trial" and e["sha256"] == parent for e in ev):
+                if parent and not any(e["kind"] == "trial" and e["body"].get("trial_id", e["sha256"]) == parent for e in ev):
                     raise ValueError("trial parent is not a retained earlier trial")
             if kind == "final_opened" and not any(e["kind"] == "closed" for e in ev):
                 raise ValueError("close campaign before opening final labels")
@@ -223,8 +231,9 @@ class CampaignLedger:
             raise ValueError("score artifact content changed")
         return series_from_payload(payload)
 
-    def close(self, frozen_factor_hashes: list[str]):
-        return self.record("closed", {"frozen_factor_hashes": sorted(frozen_factor_hashes)})
+    def close(self, frozen_factor_hashes: list[str], frozen_baseline_hashes: list[str] | None = None):
+        return self.record("closed", {"frozen_factor_hashes": sorted(frozen_factor_hashes),
+                                       "frozen_baseline_hashes": sorted(frozen_baseline_hashes or [])})
 
     def open_final(self, evidence: dict):
         """Evaluator supplies aggregate evidence; final labels are never logged as feedback."""
@@ -243,6 +252,8 @@ class CampaignLedger:
                   "production_admissions": 0, "data_status": self.spec.data_status,
                   "model_vintage_status": self.spec.model_vintage_status,
                   "historical_implementability": False, "net_implementability": False,
+                  "performance_headline_eligible": False, "process_os_isolated": False,
+                  "data_provenance_verified": False,
                   "combined_portfolio_evaluated": False, "null_results_valid": True,
                   "compute_and_search_budget": self.spec.payload(),
                   "readiness": "SYNTHETIC_MECHANICS_ONLY"}

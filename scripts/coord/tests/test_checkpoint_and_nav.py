@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -33,9 +34,12 @@ def av(tmp_path, monkeypatch):
     mod = _load(AV, "avcoord_under_test_checkpoint")
     sb = tmp_path / "sb"
     mod._init_sandbox(sb)
+    # Stamp relative to now: a fixed date turns every freshness assertion into a time bomb
+    # that fails on a clock tick rather than on a code change.
+    fresh = (datetime.now(timezone(timedelta(hours=8))) - timedelta(hours=1)).isoformat(timespec="seconds")
     (sb / "MemoryBank" / "CURRENT.md").write_text(
         "---\nsession_id: sess-test\nstale_after_hours: 48\n"
-        "last_updated: 2026-09-07T12:00:00+08:00\n---\n# CURRENT\n",
+        f"last_updated: {fresh}\n---\n# CURRENT\n",
         encoding="utf-8",
     )
     yield mod

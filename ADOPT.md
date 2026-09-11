@@ -5,11 +5,8 @@ Portable, git-native multi-agent memory for **any** project. MemoryBank is the o
 ## Install
 
 ```bash
-# From this repo (or after cloning agentvault)
+# From a cloned AgentVault 2.1 release
 python3 /path/to/agentvault/scripts/coord/avcoord.py init --target /path/to/your-project --full
-
-# Or copy the template tree
-cp -R templates/agentvault-portable/. /path/to/your-project/
 ```
 
 ## First session
@@ -21,15 +18,41 @@ bin/avcoord status
 ```
 
 1. Edit `MemoryBank/projectbrief.md` and `MemoryBank/techContext.md`.
-2. Open the project in Cursor / Copilot / Claude Code — agents read `AGENTS.md` Boot.
+2. Open the project in Cursor / Copilot / Claude Code — agents read `AGENTS.md` §1
+   Workspace Entry Protocol.
 3. Optional enforcement: `git config core.hooksPath .githooks`
-4. Contested writes: `bin/avcoord claim --agent orchestrator --resource MemoryBank/CURRENT.md`
+4. Register a run before journal writes, then use its printed `run_id` and `run_token`.
+5. Claim every contested target before writing it.
+6. Record your project's test command in `.agentvault/INDEX.md`, and adapt the
+   test and lint steps in `.config/wt.toml` before relying on `pre-merge`.
 
-## Boot (every agent, every session)
+## Entry (every agent, every session)
 
-**P0:** `MemoryBank/CURRENT.md` + `board.md` (or `avcoord status`). Do **not** dump `progress.md` or episodic JSON.  
-**P1 on write:** `PROTOCOL.quick.md` + claim.  
-**P2 on epic:** ETS + `next-id` + append progress/`events.jsonl`.
+**P0 — orient:** Read `.agentvault/INDEX.md`. Check `.agentvault/tasks/board.json`
+and `.agentvault/handoffs/<branch>.md` for work to continue; if a handoff exists,
+run its reproducer command **before** reading code. Then read
+`MemoryBank/CURRENT.md`, run `bin/avcoord refresh --views-only`, and read
+`board.md` or `bin/avcoord status`. Do not dump `progress.md` or episodic JSON.
+**P1 on write:** Read `PROTOCOL.quick.md`, register a run, and claim the exact path.
+**Before yielding:** checkpoint commit, write `.agentvault/handoffs/<branch>.md`,
+set the board to `NEEDS_CONTINUATION`. See `AGENTS.md` §3 — it is mandatory.
+**DONE:** `bin/avcoord gate` must exit zero. `verify` records evidence review; it is not a test.
+
+## Upgrade and interrupted install recovery
+
+```bash
+python3 /path/to/agentvault/scripts/coord/avcoord.py init --target . --upgrade --preview
+python3 /path/to/agentvault/scripts/coord/avcoord.py init --target . --upgrade
+
+# If doctor reports INSTALL_RECOVERY_REQUIRED:
+bin/avcoord init --target . --recover resume --preview
+bin/avcoord init --target . --recover resume
+# or restore the retained before-image:
+bin/avcoord init --target . --recover rollback
+```
+
+`AGENTVAULT_INSTALL.json` is the software receipt. It does not replace MemoryBank or store task
+state. See `MemoryBank/coord/specs/CORE_CONSUMER_CONTRACT.md` and `TASK_CONTRACT.md`.
 
 ## Do not install
 
@@ -49,7 +72,7 @@ Archives land in `EpisodicTracker/archive/`. Lease-gate any rewrite of `state_tr
 ## Verify
 
 ```bash
-bin/avcoord test --trail   # if you keep the test suite
+bin/avcoord gate --full
 bin/avcoord doctor
 ```
 

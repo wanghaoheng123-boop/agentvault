@@ -12,16 +12,21 @@ from pathlib import Path
 
 import pytest
 
-from conftest import SRC
+from conftest import SRC, expected_head
 
 
 @pytest.fixture
-def cw(av):
+def cw(av, writer_credentials):
     spec = importlib.util.spec_from_file_location("cw_under_test", SRC / "commit_worker.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules["cw_under_test"] = mod
     spec.loader.exec_module(mod)
     mod.av.configure_paths(av.ROOT)
+    original = mod.commit
+    def authenticated_commit(event_type, body, **kw):
+        kw.setdefault("expected", expected_head(mod, event_type, body, kw.get("task_id", "")))
+        return original(event_type, body, **kw)
+    mod.commit = authenticated_commit
     return mod
 
 
@@ -58,10 +63,19 @@ def test_payload_blobs_match_their_recorded_hash(cw):
 
 def test_idempotency_key_returns_the_existing_event(cw):
     a = cw.commit("task.transition", {"task_id": "T", "status": "open"}, idempotency_key="k1")
-    b = cw.commit("task.transition", {"task_id": "T", "status": "done"}, idempotency_key="k1")
     assert a["status"] == "committed"
+
+    # Replaying the SAME request returns the original receipt and repeats no effect.
+    b = cw.commit("task.transition", {"task_id": "T", "status": "open"}, idempotency_key="k1")
     assert b["status"] == "duplicate" and b["seq"] == a["seq"]
     assert len(cw.read_prefix()) == 1
+
+    # A DIFFERENT request under the same key is a collision, not a silent overwrite. Without
+    # this branch the key could be ignored entirely and the test above would still pass.
+    with pytest.raises(ValueError, match="reused for a different request"):
+        cw.commit("task.transition", {"task_id": "T", "status": "done"}, idempotency_key="k1")
+    assert len(cw.read_prefix()) == 1
+    assert cw.read_prefix()[0]["body"]["status"] == "open"
 
 
 def test_resources_are_canonicalized_and_escapes_rejected(cw):
@@ -136,8 +150,14 @@ def test_replay_quarantines_never_deletes(cw):
     assert plan["valid_prefix_seq"] == 1
     assert victim.name in plan["quarantined"]
     assert not victim.exists()
-    assert (cw.quarantine_dir() / victim.name).exists(), "quarantined, not deleted"
-    assert (cw.quarantine_dir() / f"{victim.stem}.reason.txt").exists()
+    # Each incident gets its own directory, so quarantining the same event name twice cannot
+    # overwrite earlier evidence.
+    incidents = [d for d in cw.quarantine_dir().iterdir() if d.is_dir()]
+    assert len(incidents) == 1
+    moved = incidents[0] / victim.name
+    assert moved.exists(), "quarantined, not deleted"
+    assert json.loads(moved.read_text())["body"]["status"] == "TAMPERED"
+    assert (incidents[0] / "reason.txt").exists()
 
 
 def test_replay_dry_run_mutates_nothing(cw):
@@ -172,6 +192,35 @@ def test_orphan_payload_from_a_crash_has_no_authority(cw):
     assert orphan.exists(), "and must not be deleted"
 
 
+def test_crash_after_payload_fsync_before_event_publication_has_no_authority(cw, monkeypatch):
+    body = {"artifact_id": "ART-CRASH", "canonical_path": "reports/crash.md", "owner": "doc_writer"}
+    with monkeypatch.context() as scoped:
+        scoped.setattr(cw.os, "link", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("crash")))
+        with pytest.raises(OSError, match="crash"):
+            cw.commit("artifact.registered", body, payloads=[{"evidence": "durable-before-event"}],
+                      idempotency_key="crash-before-publication")
+    seq, _, problems = cw.verify_chain()
+    assert (seq, problems) == (0, [])
+    assert len(list(cw.payloads_dir().glob("*.json"))) == 1
+    assert len(list(cw.staging_dir().glob("*.json"))) == 1
+
+
+def test_duplicate_retry_repairs_projection_after_post_commit_crash(cw, monkeypatch):
+    body = {"task_id": "TASK-POST-COMMIT-CRASH", "status": "open"}
+    with monkeypatch.context() as scoped:
+        scoped.setattr(cw, "rebuild_projections",
+                       lambda *args, **kwargs: (_ for _ in ()).throw(OSError("projection crash")))
+        with pytest.raises(OSError, match="projection crash"):
+            cw.commit("task.transition", body, idempotency_key="crash-after-publication")
+    assert cw.verify_chain()[0] == 1
+    assert not (cw.projections_dir() / "tasks/TASK-POST-COMMIT-CRASH.json").exists()
+
+    duplicate = cw.commit("task.transition", body, idempotency_key="crash-after-publication")
+    assert duplicate["status"] == "duplicate" and duplicate["seq"] == 1
+    projected = json.loads((cw.projections_dir() / "tasks/TASK-POST-COMMIT-CRASH.json").read_text())
+    assert projected["status"] == "open" and projected["revision"] == 1
+
+
 def test_duplicate_sequence_publication_is_refused(cw):
     """os.link gives atomicity AND exclusivity: a second writer at the same seq gets EEXIST."""
     cw.commit("task.transition", {"task_id": "T", "status": "open"})
@@ -192,7 +241,7 @@ def test_journal_writes_nothing_outside_its_own_tree(cw, av):
     cw.commit("task.transition", {"task_id": "T", "status": "open"})
     assert av.CURRENT.read_bytes() == current_before, "P03 must not touch CURRENT.md"
     assert (av.COORD / "threads.json").read_bytes() == threads_before, "P03 must not touch threads.json"
-    assert not av.BOARD.exists() or True  # board is only written by refresh
+    assert not av.BOARD.exists()  # board is only written by refresh
     # The staged projection is separate from the legacy file.
     assert (cw.projections_dir() / "threads.json").exists()
 

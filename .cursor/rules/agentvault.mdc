@@ -1,9 +1,13 @@
 ---
-description: AgentVault — follow AGENTS.md Boot exactly
+description: AgentVault — follow AGENTS.md §1 Workspace Entry Protocol exactly
 globs: ["**/*"]
 alwaysApply: true
 ---
 
-Follow `AGENTS.md` Boot exactly. Do not invent a shorter boot.
-Use `MemoryBank/CURRENT.md` + `board.md` (or `avcoord status`). On write/multi-agent, skim `MemoryBank/coord/PROTOCOL.quick.md` and claim contested paths.
-AgentVault MemoryBank is the only SSOT — do not create `workspace/SESSION_STATE.json`.
+Follow `AGENTS.md` §1 Workspace Entry Protocol; handoff per §3 before yielding.
+
+`.agentvault/` (task board, handoffs, invariants, ADRs) owns task routing and
+continuity. MemoryBank + `bin/avcoord` own TTL leases, the journal, and the
+deterministic gate. Never create `.agentvault/MemoryBank/` (the health check
+rejects the nesting as DUAL_SSOT), `workspace/SESSION_STATE.json`, or
+`MemoryBank/active/`.

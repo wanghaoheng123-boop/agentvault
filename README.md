@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🧠 AgentVault
+# 🧠 AgentVault 2.1
 
 ### Drop-in persistent memory for any AI coding agent.
 
@@ -31,16 +31,39 @@ Every time you start a new chat with an AI coding agent, it forgets everything. 
 
 ## ⚡ 30-Second Quick Start
 
-```bash
-git clone https://github.com/<your-org>/agentvault.git
-python3 agentvault/scripts/coord/avcoord.py init --target ~/my-project --full
-# or: cp -R agentvault/templates/agentvault-portable/. ~/my-project/
+One command. It fetches the release, installs the workspace, initialises a git
+repository if there isn't one, and switches on the lease-enforcing commit hook:
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/wanghaoheng123-boop/agentvault/main/install.sh | bash -s -- ~/my-project
+```
+
+Piping a script into a shell means trusting it. To read it first — same result:
+
+```bash
+git clone https://github.com/wanghaoheng123-boop/agentvault.git
+less agentvault/install.sh          # read it
+./agentvault/install.sh ~/my-project
+```
+
+Add `--with-aeap` to either form for the uncalibrated evaluation extension.
+
+<details>
+<summary>Manual install, if you would rather drive it yourself</summary>
+
+```bash
+git clone https://github.com/wanghaoheng123-boop/agentvault.git
+python3 agentvault/scripts/coord/avcoord.py init --target ~/my-project --full
+cd ~/my-project && git init && git config core.hooksPath .githooks
+```
+</details>
+
+```bash
 cd ~/my-project
 bin/avcoord doctor && bin/avcoord status
 ```
 
-Open the project in **Cursor**, **GitHub Copilot**, Claude Code, Codex, Windsurf, or Gemini. Agents read `AGENTS.md` Boot (CURRENT + board). Full guide: [`ADOPT.md`](ADOPT.md).
+Open the project in **Cursor**, **GitHub Copilot**, Claude Code, Codex, Windsurf, or Gemini. Agents read `AGENTS.md` §1 Workspace Entry Protocol (handoffs + board + CURRENT). Full guide: [`ADOPT.md`](ADOPT.md).
 
 **Do not** install AGENT HOOK `workspace/SESSION_STATE.json` — MemoryBank is the only SSOT.
 
@@ -52,20 +75,30 @@ AgentVault uses a **5-layer hybrid memory architecture** inspired by cognitive s
 
 ```
 your-project/
-├── AGENTS.md                        ← 🚪 Boot card (SoT)
-├── CLAUDE.md                        ← 🔗 Symlink → AGENTS.md
+├── AGENTS.md                        ← 🚪 Entry protocol (SoT)
+├── CLAUDE.md                        ←    Regular adapter; reviewed bytes match AGENTS.md
 ├── .cursor/rules/agentvault.mdc     ← 🎯 Cursor always-on pointer
+│
+├── .agentvault/                     ← 🧠 Task routing + handoff hub (shared across worktrees)
+│   ├── INDEX.md                     ←    Routing table — read this first
+│   ├── tasks/board.json             ←    Who is working on what
+│   ├── handoffs/                    ←    Branch-keyed continuity manifests
+│   ├── invariants/                  ←    Security + concurrency law
+│   ├── adrs/                        ←    Architectural decisions
+│   └── memory/lessons-learned.md    ←    Earned gotchas
+│
+├── .config/wt.toml                  ← 🌳 Worktree lifecycle hooks (Worktrunk)
 │
 ├── OpenViking/                      ← 📜 Rules (L0 identity, L1 architecture, L2 ops)
 │   └── .abstract                    ←    TOC — read on need
 │
 ├── MemoryBank/                      ← 💾 Project state + coordination
-│   ├── CURRENT.md                   ←    Single-writer “what’s next”
+│   ├── CURRENT.md                   ←    Journal-generated “what’s next” view
 │   ├── board.md                     ←    Dashboard (leases, mail, threads)
 │   ├── activeContext.md             ←    Derived compat summary (not SSOT)
 │   ├── sessions/                    ←    Create-once handoffs
 │   ├── agents/                      ←    Registry + private context
-│   ├── coord/                       ←    PROTOCOL.quick + PROTOCOL + leases + mail
+│   ├── coord/                       ←    Commit journal + projections + leases + mail
 │   ├── progress.md                  ←    Append-only ledger
 │   └── …
 │
@@ -78,7 +111,10 @@ your-project/
 ### How It Works
 
 ```
-Agent opens project → reads AGENTS.md Boot card
+Agent opens project → reads AGENTS.md entry protocol
+        │
+        ▼
+.agentvault/ handoffs + board  (continue abandoned work?)
         │
         ▼
 MemoryBank/CURRENT.md  (+ STALE check)
@@ -96,7 +132,9 @@ Deep links only as needed (L0/L2, full PROTOCOL, progress tail, events.jsonl)
 Execute ✅
 ```
 
-`activeContext.md` is **derived** by `avcoord refresh` — do not treat it as the handoff bus.
+`CURRENT.md`, `board.md`, and `activeContext.md` are views after journal cutover. Durable task
+and workspace transitions enter through the guarded commit journal. `refresh --views-only`
+redraws the lightweight views and never marks the workspace verified.
 
 ---
 
@@ -106,7 +144,9 @@ Execute ✅
 The **Episodic Tracker** logs every experiment with `parameters_tested` and `status`. Before trying anything complex, the agent checks what already failed.
 
 ### 🔄 Cross-Device, Cross-Agent Continuity
-`MemoryBank/CURRENT.md` is the single-writer volatile pointer; session detail lives in `MemoryBank/sessions/`. `activeContext.md` is a derived compat summary. Stop on one device, open on another — boot CURRENT + board + PROTOCOL.
+The hash-chained commit journal is the operational authority. `MemoryBank/CURRENT.md` is its
+short boot projection; session detail lives in `MemoryBank/sessions/`. Stop on one device,
+open on another, then boot through CURRENT, board, and the protocol.
 
 ### 📬 Multi-Agent Coordination
 Portable file protocol (no server): TTL path leases, maildir messaging, monotonic IDs, blackboard.
@@ -115,7 +155,7 @@ Portable file protocol (no server): TTL path leases, maildir messaging, monotoni
 python3 scripts/coord/avcoord.py doctor
 python3 scripts/coord/avcoord.py claim --agent research --resource VectorRAG/index.json
 python3 scripts/coord/avcoord.py post --from orchestrator --to research --type assign --summary "..."
-python3 scripts/coord/avcoord.py refresh
+python3 scripts/coord/avcoord.py refresh --views-only
 ```
 
 Contract: [`MemoryBank/coord/PROTOCOL.quick.md`](MemoryBank/coord/PROTOCOL.quick.md) (full: [`PROTOCOL.md`](MemoryBank/coord/PROTOCOL.md)).
@@ -124,6 +164,30 @@ Contract: [`MemoryBank/coord/PROTOCOL.quick.md`](MemoryBank/coord/PROTOCOL.quick
 python3 scripts/coord/avcoord.py status
 # or: bin/avcoord status
 ```
+
+### 📦 Exact installation and recovery
+
+Every install pins release `2.1.0`, state schema `agentvault-v1`, selected profiles, and every
+managed software byte in `AGENTVAULT_INSTALL.json`. Project memory, research, configuration,
+and declared overrides stay user owned. Preview an upgrade before applying it:
+
+```bash
+python3 /path/to/agentvault/scripts/coord/avcoord.py init --target . --upgrade --preview
+python3 /path/to/agentvault/scripts/coord/avcoord.py init --target . --upgrade
+```
+
+If a process stops during a software transaction, `doctor` reports
+`INSTALL_RECOVERY_REQUIRED`. Inspect and resume or restore the complete before-image:
+
+```bash
+bin/avcoord init --target . --recover resume --preview
+bin/avcoord init --target . --recover resume
+# or: bin/avcoord init --target . --recover rollback
+```
+
+The release manifest binds all file hashes and executable modes. AEAP ships uncalibrated and
+keeps production admission disabled until the adopter supplies certified isolation and
+independent calibration evidence.
 
 ### 🧩 Sub-Agent Delegation
 The Master Orchestrator protocol includes a 6-agent registry for delegating work:
@@ -156,7 +220,7 @@ Depth research, specialist playbooks (AI systems, quant, mathematician), epistem
 | Environment | Detection file | Notes |
 |---------------|----------------|-------|
 | **Cursor** | `AGENTS.md`, `.cursorrules`, `.cursor/rules/agentvault.mdc` | Full support |
-| **Claude Code** | `CLAUDE.md` → `AGENTS.md` | Symlink |
+| **Claude Code** | `CLAUDE.md`, `AGENTS.md` | Regular adapter with identical reviewed bytes |
 | **GitHub Copilot** | `AGENTS.md`, `.github/copilot-instructions.md` | Full support |
 | **Windsurf** | `.windsurfrules`, `AGENTS.md` | Thin pointer |
 | **Gemini CLI** | `GEMINI.md`, `AGENTS.md` | Thin pointer |

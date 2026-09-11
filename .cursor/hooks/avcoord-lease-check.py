@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Cursor PreToolUse: deny contested writes without a live avcoord lease.
 
+Ambient Kernel (AK-SPWS / ADR-009): this hook is the out-of-band coordination
+plane. Agents should `avcoord hydrate` at boot instead of parsing PROTOCOL.
+Lease enforcement stays fail-closed here; optional reservation heartbeats live
+under MemoryBank/coord/lock/reservations/.
+
 Env:
   AVCOORD_AGENT  — agent id (default: orchestrator)
   AVCOORD_ROOT   — optional workspace root override
@@ -75,9 +80,11 @@ def deny(agent_msg: str, user_msg: str | None = None) -> int:
 def main() -> int:
     raw = sys.stdin.read()
     try:
-        payload = json.loads(raw) if raw.strip() else {}
+        payload = json.loads(raw) if raw.strip() else None
     except json.JSONDecodeError:
-        return allow()
+        return deny("Lease hook received malformed JSON; write denied")
+    if not isinstance(payload, dict):
+        return deny("Lease hook received no valid tool payload; write denied")
 
     tool = (
         payload.get("tool_name")
@@ -86,20 +93,24 @@ def main() -> int:
         or ""
     )
     # Only gate mutating file tools
-    mutate = {"Write", "StrReplace", "EditNotebook", "Delete", "write", "search_replace"}
+    mutate = {
+        "Write", "StrReplace", "EditNotebook", "Delete", "ApplyPatch", "Rename", "Shell",
+        "write", "search_replace", "apply_patch", "rename", "shell", "run_terminal_cmd",
+    }
     if tool and tool not in mutate and not any(m.lower() in str(tool).lower() for m in ("write", "streplace", "editnotebook", "delete")):
         return allow()
 
     paths = extract_paths(payload)
     if not paths:
-        return allow()
+        return deny("Mutating tool did not provide a verifiable target path; write denied")
 
     root = find_root()
     cli = root / "scripts" / "coord" / "avcoord.py"
-    if not cli.exists():
-        return allow("avcoord missing; lease check skipped")
+    if cli.is_symlink() or not cli.is_file():
+        return deny("avcoord lease checker is missing or unsafe; write denied")
 
     agent = os.environ.get("AVCOORD_AGENT", "orchestrator")
+    run_id = os.environ.get("AVCOORD_RUN_ID", "")
     env = os.environ.copy()
     env["AVCOORD_ROOT"] = str(root)
 
@@ -108,13 +119,20 @@ def main() -> int:
         # and fails closed. The old try/except here silently left an unrelativizable path
         # absolute (a case-variant or symlinked root raises ValueError), and an absolute
         # path is never matched as contested — an exit-0 bypass.
-        proc = subprocess.run(
-            [sys.executable, str(cli), "check-lease", "--agent", agent, "--path", path],
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=str(root),
-        )
+        try:
+            command = [sys.executable, str(cli), "check-lease", "--agent", agent, "--path", path]
+            if run_id:
+                command.extend(["--run", run_id])
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=str(root),
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return deny("avcoord lease checker could not complete; write denied")
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip()
             return deny(

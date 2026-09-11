@@ -27,14 +27,14 @@ def _forward_sum(wide: pd.DataFrame, horizon: int) -> pd.DataFrame:
 
 
 def make_panel(n_dates: int = 180, n_assets: int = 40, seed: int = 0, signal: float = 0.0,
-               horizon: int = 5, noise: float = 1.0, regime_split: float = 0.5):
+               horizon: int = 5, noise: float = 1.0, regime_split: float = 0.5, start="2020-01-01"):
     """Returns (features, returns, regimes, eligible_counts, scheduled_dates).
 
     `signal` is the true coefficient of x(t) in r(t). signal=0.0 is an exact null.
     """
     rng = np.random.default_rng(seed)
     total = n_dates + horizon + 1
-    dates = pd.date_range("2020-01-01", periods=total, freq="B")
+    dates = pd.date_range(start, periods=total, freq="B")
     assets = [f"A{i:03d}" for i in range(n_assets)]
 
     def wide(scale: float = 1.0) -> pd.DataFrame:
@@ -138,7 +138,7 @@ class PointInTimePanel:
                           & (self.features.available_at <= dd)]
         f = f.sort_values(["available_at", "revision"]).drop_duplicates(["date", "asset", "feature"], keep="last")
         features = {}
-        for name in sorted(self.features.feature.unique()):
+        for name in sorted(self.features.loc[self.features.available_at <= dd, "feature"].unique()):
             rows = f[f.feature == name].set_index(["date", "asset"])
             features[name] = rows.value.reindex(idx).astype("float64").rename(name)
         r = self.labels[self.labels.date.isin(sched) & (self.labels.available_at <= dd)
@@ -149,9 +149,9 @@ class PointInTimePanel:
         return features, returns, regimes, eligible, sched
 
 
-def make_pit_fixture(n_dates=260, n_assets=40, seed=4242, signal=0.35, horizon=5):
+def make_pit_fixture(n_dates=260, n_assets=40, seed=4242, signal=0.35, horizon=5, start="2020-01-01"):
     """Single frozen synthetic world for replay; a candidate never changes its true signal."""
-    features, returns, regimes, _, sched = make_panel(n_dates, n_assets, seed, signal, horizon)
+    features, returns, regimes, _, sched = make_panel(n_dates, n_assets, seed, signal, horizon, start=start)
     expanded = pd.bdate_range(sched[0], periods=n_dates + horizon + 1)
     rows = []
     for name, values in features.items():

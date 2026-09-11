@@ -10,13 +10,22 @@ Environment:
 
 Commands:
   claim | release | renew | post | recv | ack | next-id | refresh | doctor | test
+  hydrate | intent | query | done | compact | fingerprint   # AK-SPWS (ADR-009)
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import contextlib
+import io
 import fcntl
 import hashlib
+import hmac
+import secrets
+import threading
+import types
+import importlib.util
 import json
 import os
 import posixpath
@@ -153,49 +162,71 @@ def atomic_write_json(path: Path, data: Any) -> None:
     atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
-class FileLock:
-    """Exclusive advisory lock, released by the kernel when the holder dies.
+# Shared across importlib-loaded avcoord instances; a nested writer must not deadlock
+# itself, while threads and other processes still serialize on the same inode.
+_LOCK_STATE = sys.modules.setdefault("_agentvault_lock_state", types.ModuleType("_agentvault_lock_state"))
+if getattr(_LOCK_STATE, "pid", None) != os.getpid():
+    _LOCK_STATE.pid = os.getpid()
+    _LOCK_STATE.guard = threading.Lock()
+    _LOCK_STATE.locks = {}
 
-    This replaces the previous mtime-based scheme, which stole a lock purely because it
-    was 30s old — handing it to a second writer while the first was still inside its
-    critical section — and whose release unlinked whatever lock file happened to be
-    there, including one another process had just taken.
-    """
+
+class FileLock:
+    """Reentrant per thread, kernel-released on process exit; never steal live locks."""
 
     def __init__(self, path: Path, timeout: float = 10.0) -> None:
-        self.path = path
-        self.timeout = timeout
-        self._fd: int | None = None
+        self.path, self.timeout = Path(path), timeout
+        self._entry = None
 
-    def __enter__(self) -> "FileLock":
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, 0o600)
-        deadline = time.monotonic() + self.timeout
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    os.close(fd)
-                    raise RuntimeError(f"could not acquire {self.path.name} within {self.timeout}s")
-                time.sleep(0.01)
+    def __enter__(self):
+        if _LOCK_STATE.pid != os.getpid():
+            _LOCK_STATE.pid = os.getpid()
+            _LOCK_STATE.guard = threading.Lock()
+            _LOCK_STATE.locks = {}
+        key = str(self.path.resolve())
+        with _LOCK_STATE.guard:
+            entry = _LOCK_STATE.locks.setdefault(key, {"mutex": threading.RLock(), "depth": 0, "fd": None})
+        if not entry["mutex"].acquire(timeout=self.timeout):
+            raise RuntimeError(f"could not acquire {self.path.name} within {self.timeout}s")
         try:
-            os.ftruncate(fd, 0)
-            os.write(fd, f"{os.getpid()}\n".encode())
-        except OSError:
-            pass
-        self._fd = fd
-        return self
+            if not entry["depth"]:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                deadline = time.monotonic() + self.timeout
+                try:
+                    while True:
+                        try:
+                            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            if time.monotonic() >= deadline:
+                                raise RuntimeError(f"could not acquire {self.path.name} within {self.timeout}s")
+                            time.sleep(0.01)
+                except BaseException:
+                    os.close(fd)
+                    raise
+                entry["fd"] = fd
+            entry["depth"] += 1
+            self._entry = entry
+            return self
+        except BaseException:
+            entry["mutex"].release()
+            raise
 
-    def __exit__(self, *exc: Any) -> None:
-        if self._fd is None:
+    def __exit__(self, *exc):
+        entry, self._entry = self._entry, None
+        if entry is None:
             return
         try:
-            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            entry["depth"] -= 1
+            if not entry["depth"]:
+                try:
+                    fcntl.flock(entry["fd"], fcntl.LOCK_UN)
+                finally:
+                    os.close(entry["fd"])
+                    entry["fd"] = None
         finally:
-            os.close(self._fd)
-            self._fd = None
+            entry["mutex"].release()
 
 
 def coord_lock(name: str = "coord.lock", timeout: float = 10.0) -> FileLock:
@@ -391,15 +422,29 @@ def canon_or_none(raw: Any, *, root: Path | None = None) -> "Res | None":
 
 
 def res_covers(outer: Res, inner: Res) -> bool:
-    """DIRECTIONAL: does `outer` contain `inner`? Boundary-safe at segment edges."""
-    if not outer.key:
+    """DIRECTIONAL authorization using exact canonical path spelling.
+
+    Case-folding is deliberately reserved for claim exclusion. Using it here would let
+    a lease on ``reports/A.md`` authorize the distinct ``reports/a.md`` on a
+    case-sensitive filesystem. Exact spelling may conservatively deny a case alias on a
+    case-insensitive volume, which is the safe direction for write authorization.
+    """
+    if not outer.display:
         return True  # the workspace root covers everything
+    return (inner.display == outer.display
+            or inner.display.startswith(outer.display + "/"))
+
+
+def _folded_covers(outer: Res, inner: Res) -> bool:
+    """Conservative comparison used only to exclude potentially colliding claims."""
+    if not outer.key:
+        return True
     return inner.key == outer.key or inner.key.startswith(outer.key + "/")
 
 
 def resources_overlap(a: Res, b: Res) -> bool:
     """SYMMETRIC: do these two resources share any concrete path? Claim exclusion only."""
-    return res_covers(a, b) or res_covers(b, a)
+    return _folded_covers(a, b) or _folded_covers(b, a)
 
 
 def lease_authorizes(lease_res: Any, target: Any) -> bool:
@@ -449,11 +494,11 @@ def runs_dir() -> Path:
 
 def load_run(run_id: str) -> dict | None:
     """A registered, unexpired run, or None. An arbitrary id string grants no authority."""
-    if not run_id:
+    if not isinstance(run_id, str) or not re.fullmatch(r"run-[A-Za-z0-9-]{1,100}", run_id):
         return None
     p = runs_dir() / f"{run_id}.json"
     data = load_json(p, None)
-    if not data:
+    if not data or data.get("run_id") != run_id or data.get("status") != "active":
         return None
     try:
         exp = datetime.fromisoformat(data["expires_at"])
@@ -473,7 +518,7 @@ def resolve_run(args: argparse.Namespace) -> tuple[str | None, int, str | None]:
     legacy principal with fence 0 that behaves exactly as before — that is what keeps the
     five runtime wrappers, bin/avcoord and both hooks working unchanged.
     """
-    rid = getattr(args, "run", None)
+    rid = getattr(args, "run", None) or os.environ.get("AVCOORD_RUN_ID")
     if not rid:
         return None, 0, None
     run = load_run(rid)
@@ -485,6 +530,11 @@ def resolve_run(args: argparse.Namespace) -> tuple[str | None, int, str | None]:
     agent = getattr(args, "agent", None)
     if agent and run.get("agent_id") != agent:
         return None, 0, f"run '{rid}' belongs to agent '{run.get('agent_id')}', not '{agent}'"
+    if run.get("token_sha256"):
+        token = getattr(args, "run_token", None) or os.environ.get("AVCOORD_RUN_TOKEN", "")
+        if not isinstance(token, str) or not hmac.compare_digest(
+                run["token_sha256"], hashlib.sha256(token.encode()).hexdigest()):
+            return None, 0, "missing or invalid run token"
     return rid, int(run.get("fence", 0)), None
 
 
@@ -497,8 +547,10 @@ def cmd_run_start(args: argparse.Namespace) -> int:
     run_id = f"run-{now().strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
     ttl_h = float(getattr(args, "ttl_hours", None) or RUN_TTL_HOURS_DEFAULT)
     agent = registry_agent(args.role) or {}
+    run_token = secrets.token_urlsafe(32)
     run = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
+        "token_sha256": hashlib.sha256(run_token.encode()).hexdigest(),
         "run_id": run_id,
         "agent_id": args.role,
         "role": args.role,
@@ -514,7 +566,7 @@ def cmd_run_start(args: argparse.Namespace) -> int:
     atomic_write_json(runs_dir() / f"{run_id}.json", run)
     fsync_dir(runs_dir())
     audit("run_start", run_id=run_id, agent=args.role, runtime=args.runtime, fence=fence)
-    print(json.dumps(run, indent=2))
+    print(json.dumps({**run, "run_token": run_token}, indent=2))
     return 0
 
 
@@ -530,12 +582,33 @@ def cmd_run_list(args: argparse.Namespace) -> int:
 
 
 def lease_resources(lease: dict) -> list[Res]:
-    """Canonical resources of a stored lease, skipping any that will not canonicalize."""
-    out = []
-    for r in lease.get("resources", []):
-        c = canon_or_none(r)
-        if c is not None:
-            out.append(c)
+    """Return resources still bound to the canonical objects captured at claim time.
+
+    A requested symlink is re-resolved on every use. If it was removed or retargeted,
+    its lease grants nothing. This prevents a claim on link->A from silently becoming a
+    capability for link->B. Older leases are checked against their stored comparison
+    keys; newly issued leases also carry the exact canonical display path.
+    """
+    resources = lease.get("resources") or []
+    keys = lease.get("resource_keys") or []
+    captured = lease.get("canonical_resources") or []
+    requested = lease.get("requested_resources") or resources
+    if not isinstance(resources, list) or not isinstance(keys, list) or len(resources) != len(keys):
+        return []
+    if captured and (not isinstance(captured, list) or len(captured) != len(resources)):
+        return []
+    if not isinstance(requested, list) or len(requested) != len(resources):
+        return []
+    out: list[Res] = []
+    for index, stored in enumerate(resources):
+        current = canon_or_none(requested[index])
+        bound = canon_or_none(captured[index] if captured else stored)
+        if current is None or bound is None or current.key != keys[index] or bound.key != keys[index]:
+            continue
+        if captured and (current.display != bound.display
+                         or bound.display != canon_resource(stored).display):
+            continue
+        out.append(bound)
     return out
 
 
@@ -546,10 +619,9 @@ def _same_principal(lease: dict, agent: str, run_id: str | None) -> bool:
     other. Legacy callers with no run identity fall back to the agent id, which preserves
     today's behavior (re-claiming your own resource stays idempotent).
     """
-    other_run = lease.get("run_id")
-    if run_id and other_run:
-        return other_run == run_id
-    return lease.get("agent_id") == agent
+    other_run = lease.get("run_id") or None
+    return lease.get("agent_id") == agent and other_run == (run_id or None)
+
 
 
 def cmd_claim(args: argparse.Namespace) -> int:
@@ -569,12 +641,13 @@ def cmd_claim(args: argparse.Namespace) -> int:
     if err:
         print(f"FAIL: {err}", file=sys.stderr)
         return 1
-    check_write_scopes(args.agent, [c for _, c in wanted], strict=getattr(args, "strict_scopes", False))
+    if not check_write_scopes(args.agent, [c for _, c in wanted], strict=getattr(args, "strict_scopes", False)):
+        return 1
     ttl_min = parse_ttl(args.ttl)
     expires = now() + timedelta(minutes=ttl_min)
     LEASES.mkdir(parents=True, exist_ok=True)
     try:
-        with FileLock(LEASES / ".claim.lock"):
+        with coord_lock():
             live = read_leases(reap=True)
             for raw, c in wanted:
                 for other in live:
@@ -589,13 +662,18 @@ def cmd_claim(args: argparse.Namespace) -> int:
                             audit("claim_denied", agent=args.agent, resource=raw, holder=other.get("agent_id"))
                             return 1
             for raw, c in wanted:
+                modern = bool(run_id and load_run(run_id).get("token_sha256"))
+                stored_resource = c.display + ("/**" if c.explicit_subtree else "")
                 lease = {
-                    "schema_version": "1.1",
+                    "schema_version": "2.0" if modern else "1.1",
                     "agent_id": args.agent,
                     "run_id": run_id or "",
-                    "fence": fence,
-                    "resources": [raw],
+                    "fence": int(allocate_id("fence")) if modern else fence,
+                    "run_fence": fence,
+                    "resources": [stored_resource],
                     "resource_keys": [c.key],
+                    "canonical_resources": [stored_resource],
+                    "requested_resources": [raw],
                     "lease_token": uuid.uuid4().hex,
                     "reason": args.reason or "",
                     "task_id": args.task_id or "",
@@ -643,7 +721,9 @@ def cmd_release(args: argparse.Namespace) -> int:
         return 1
     removed = 0
     fenced_out = 0
-    with FileLock(LEASES / ".claim.lock"):
+    token_denied = 0
+    mine = 0
+    with coord_lock():
         for p in sorted(LEASES.glob("*.json")):
             if p.name.startswith("."):
                 continue
@@ -652,11 +732,19 @@ def cmd_release(args: argparse.Namespace) -> int:
                 continue
             if not _same_principal(lease, args.agent, run_id):
                 continue
-            if token and lease.get("lease_token") and lease["lease_token"] != token:
+            mine += 1
+            # A per-lease token authorizes ONE lease, so `--all` under a run cannot supply
+            # one: every lease has a different token. Demanding it there matched nothing and
+            # released nothing. An authenticated run is credential enough for --all — the
+            # caller proved possession of the run token in resolve_run(), and _same_principal
+            # plus the fence below still bind the sweep to leases this exact run holds.
+            # A targeted --resource release stays fail-closed: it still requires --token.
+            if (token or (run_id and not args.all)) and lease.get("lease_token") != token:
+                token_denied += 1
                 continue
             # Fencing: a run whose generation is older than the lease's cannot act on it.
             # This is what rejects a paused worker after its resource was reclaimed.
-            if run_id and int(lease.get("fence", 0)) > fence:
+            if run_id and int(lease.get("run_fence", lease.get("fence", 0))) != fence:
                 fenced_out += 1
                 continue
             if args.all:
@@ -672,10 +760,24 @@ def cmd_release(args: argparse.Namespace) -> int:
                 p.unlink(missing_ok=True)
                 removed += 1
                 audit("release", agent=args.agent, resource=lease.get("resources"))
+    if token_denied:
+        print(f"denied {token_denied} lease(s): lease token mismatch", file=sys.stderr)
     if fenced_out:
         print(f"denied {fenced_out} lease(s): stale fence", file=sys.stderr)
+    if not removed:
+        # "released 0" alone cannot be read: holding nothing, being fenced out and failing
+        # token auth all printed the same line. Name which one it was.
+        if fenced_out:
+            why = f"{fenced_out} lease(s) held under a different fence generation"
+        elif token_denied:
+            why = f"{token_denied} lease(s) held, none matching --token"
+        elif mine:
+            why = f"{mine} lease(s) held, none covered by the named --resource"
+        else:
+            why = f"no lease is held by {args.agent}" + (f" in run {run_id}" if run_id else "")
+        print(f"FAIL: released nothing: {why}", file=sys.stderr)
     print(f"released {removed} lease(s)")
-    return 0
+    return 0 if removed else 1
 
 
 def cmd_renew(args: argparse.Namespace) -> int:
@@ -690,7 +792,7 @@ def cmd_renew(args: argparse.Namespace) -> int:
         return 1
     n = 0
     denied = 0
-    with FileLock(LEASES / ".claim.lock"):
+    with coord_lock():
         for p in sorted(LEASES.glob("*.json")):
             if p.name.startswith("."):
                 continue
@@ -701,10 +803,10 @@ def cmd_renew(args: argparse.Namespace) -> int:
                 continue
             # A run may only renew a lease it actually holds. Without this, one run could
             # extend another's lease simply by sharing its role.
-            if token and lease.get("lease_token") and lease["lease_token"] != token:
+            if (run_id or token) and lease.get("lease_token") != token:
                 denied += 1
                 continue
-            if run_id and int(lease.get("fence", 0)) > fence:
+            if run_id and int(lease.get("run_fence", lease.get("fence", 0))) != fence:
                 denied += 1
                 continue
             lease["expires_at"] = iso(expires)
@@ -720,7 +822,7 @@ def cmd_renew(args: argparse.Namespace) -> int:
 
 def ensure_mailboxes(agent: str) -> Path:
     base = MAIL / agent
-    for sub in ("tmp", "new", "cur", "done"):
+    for sub in ("tmp", "new", "cur", "done", "receipts"):
         (base / sub).mkdir(parents=True, exist_ok=True)
     return base
 
@@ -907,32 +1009,67 @@ def cmd_ack(args: argparse.Namespace) -> int:
     if not validate_agent(args.agent):
         return 1
     base = ensure_mailboxes(args.agent)
-    src = base / "cur" / f"{args.msg}.json"
-    if not src.exists():
-        # Prefix fallback only when it resolves to exactly one candidate. The old code took
-        # an unsorted glob's [0], so `--msg MSG-1` could ack MSG-100001 nondeterministically.
-        alt = sorted((base / "cur").glob(f"{args.msg}*"))
-        if not alt:
-            print(f"FAIL: message not in cur: {args.msg}", file=sys.stderr)
+    if not isinstance(args.msg, str) or not re.fullmatch(r"MSG-[A-Za-z0-9_.-]+", args.msg):
+        print("FAIL: invalid message id/prefix", file=sys.stderr)
+        return 1
+    with coord_lock():
+        exact_cur = base / "cur" / f"{args.msg}.json"
+        exact_done = base / "done" / f"{args.msg}.json"
+        candidates = ([exact_cur] if exact_cur.is_file() else []) + ([exact_done] if exact_done.is_file() else [])
+        if not candidates:
+            candidates = sorted((base / "cur").glob(f"{args.msg}*.json"))
+            candidates += sorted((base / "done").glob(f"{args.msg}*.json"))
+        unique = {path.name: path for path in candidates}
+        if not unique:
+            print(f"FAIL: message not in cur or done: {args.msg}", file=sys.stderr)
             return 1
-        if len(alt) > 1:
-            print(
-                f"FAIL: '{args.msg}' is ambiguous: {', '.join(p.stem for p in alt)}",
-                file=sys.stderr,
-            )
+        if len(unique) > 1:
+            print(f"FAIL: '{args.msg}' is ambiguous: {', '.join(sorted(unique))}", file=sys.stderr)
             return 1
-        src = alt[0]
-    dest = base / "done" / src.name
-    data = load_json(src)
-    if data:
-        data["status"] = "acked"
-        data["acked_at"] = iso()
-        atomic_write_json(src, data)
-    os.replace(src, dest)
-    fsync_dir(dest.parent)
-    fsync_dir(src.parent)
-    audit("ack", agent=args.agent, msg=src.stem)
-    print(f"acked {src.name}")
+        src = next(iter(unique.values()))
+        dest = base / "done" / src.name
+        duplicate = src.parent == dest.parent
+        data = load_json(src)
+        if (not isinstance(data, dict) or data.get("id") != src.stem
+                or data.get("to") not in (None, args.agent)):
+            print("FAIL: invalid or misaddressed message", file=sys.stderr)
+            return 1
+        if data.get("status") != "acked":
+            data["status"] = "acked"
+            data["acked_at"] = data.get("acked_at") or iso()
+            atomic_write_json(src, data)
+        if not duplicate:
+            os.replace(src, dest)
+            fsync_dir(dest.parent)
+            fsync_dir(src.parent)
+        done_raw = dest.read_bytes()
+        receipt = {
+            "schema_version": "1.0", "effect": "mail.ack", "message_id": data["id"],
+            "agent_id": args.agent, "acked_at": data["acked_at"],
+            "message_sha256": hashlib.sha256(done_raw).hexdigest(),
+        }
+        receipt_raw = (json.dumps(receipt, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        receipt_path = base / "receipts" / f"{data['id']}.json"
+        if receipt_path.exists():
+            if receipt_path.is_symlink() or receipt_path.read_bytes() != receipt_raw:
+                print("FAIL: immutable ack receipt conflicts with completed message", file=sys.stderr)
+                return 1
+        else:
+            tmp = base / "tmp" / f".{data['id']}.{uuid.uuid4().hex}.receipt"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, receipt_raw)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            try:
+                os.link(tmp, receipt_path)
+                fsync_dir(receipt_path.parent)
+            finally:
+                tmp.unlink(missing_ok=True)
+        audit("ack", agent=args.agent, msg=data["id"], duplicate=duplicate,
+              receipt_sha256=hashlib.sha256(receipt_raw).hexdigest())
+    print(json.dumps({"status": "duplicate" if duplicate else "acked", "receipt": receipt}, indent=2))
     return 0
 
 
@@ -1075,25 +1212,80 @@ def authority() -> str:
     return str(read_protocol().get("authority", "legacy"))
 
 
+def journal_worker():
+    spec = importlib.util.spec_from_file_location("_coord_reader", Path(__file__).with_name("commit_worker.py"))
+    cw = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cw)
+    cw.av.configure_paths(ROOT)
+    return cw
+
+
 def journal_meta() -> dict:
-    """Projection metadata written by the commit worker. Empty before cutover."""
-    return load_json(COORD / "projections" / "_meta.json", {}) or {}
+    cw = journal_worker()
+    seq, digest, problems = cw.verify_chain()
+    return {"journal_seq": seq, "journal_hash": digest, "problems": problems}
+
+
+def journal_state() -> dict:
+    cw = journal_worker()
+    seq, _, problems = cw.verify_chain()
+    if problems:
+        raise RuntimeError(f"journal is not clean at valid prefix {seq}: {problems[0]}")
+    return cw.fold(cw.read_prefix())
+
+
+def _journal_proxy() -> Any:
+    """Minimal capability object shared with the Ambient Kernel writer adapter."""
+    return types.SimpleNamespace(
+        ROOT=ROOT, COORD=COORD, iso=iso, atomic_write_json=atomic_write_json,
+        atomic_write_text=atomic_write_text, fsync_dir=fsync_dir, FileLock=FileLock,
+        audit=audit, load_json=load_json, canon_resource=canon_resource,
+        CanonError=CanonError, __file__=__file__,
+    )
+
+
+def _journal_credentials(args: argparse.Namespace) -> tuple[str, str, list[dict]]:
+    run_id, _, error = resolve_run(args)
+    if error:
+        raise PermissionError(error)
+    if not run_id:
+        raise PermissionError("journal writes require --run and its run token")
+    token = getattr(args, "run_token", None) or os.environ.get("AVCOORD_RUN_TOKEN", "")
+    proofs = [lease for lease in read_leases()
+              if _same_principal(lease, getattr(args, "agent", ""), run_id)]
+    return run_id, token, proofs
+
+
+def _commit_journal(args: argparse.Namespace, event_type: str, body: dict,
+                    *, resources: list[str] | None = None,
+                    idempotency_key: str = "") -> dict:
+    run_id, token, proofs = _journal_credentials(args)
+    ak = _load_avkernel()
+    return ak.commit_rebased.commit_with_rebase(
+        _journal_proxy(), event_type, body, agent_id=args.agent, run_id=run_id,
+        run_token=token, lease_proofs=proofs, resources=resources,
+        idempotency_key=idempotency_key,
+    )
 
 
 def load_threads() -> list[dict]:
-    """Thread list from whichever store currently holds authority.
-
-    Before cutover this is coord/threads.json exactly as before. After cutover the same
-    call reads the generated projection, so every consumer follows the flip without
-    knowing that it happened.
-    """
     if authority() == "journal":
-        proj = load_json(COORD / "projections" / "threads.json", {"threads": []}) or {}
-        return list(proj.get("threads") or [])
+        cw = journal_worker()
+        state = cw.fold(cw.read_prefix())
+        threads = list(state["threads"].values())
+        known = {thread.get("id") for thread in threads}
+        for task in state["tasks"].values():
+            if task.get("task_id") in known:
+                continue
+            threads.append({
+                "id": task.get("task_id"), "title": task.get("objective", "managed task"),
+                "owner": task.get("owner_run_id") or task.get("owner") or "",
+                "status": task.get("status", ""),
+                "notes": f"journal task revision {task.get('revision', 0)}",
+            })
+        return threads
     data = load_json(COORD / "threads.json", {"threads": []})
-    if isinstance(data, dict):
-        return list(data.get("threads") or [])
-    return []
+    return list(data.get("threads") or []) if isinstance(data, dict) else []
 
 
 # sync_threads_from_current() was deleted in RFC-WORKSPACE-AEAP-20260906 P02.
@@ -1160,8 +1352,10 @@ def cmd_refresh(args: argparse.Namespace) -> int:
                        if _prefixes else "_None configured._")
 
     threads = load_threads()  # read-only: refresh never mutates thread state
-    # Prefer active threads; show all if none active
-    active = [t for t in threads if t.get("status") == "active"]
+    # Managed task lifecycle states are open until integrated/cancelled.
+    open_states = {"active", "proposed", "ready", "claimed", "in_progress",
+                   "review", "verified", "blocked"}
+    active = [t for t in threads if t.get("status") in open_states]
     show = active if active else threads
     if show:
         thread_rows = "\n".join(
@@ -1207,12 +1401,11 @@ authority: {authority()}
 """
     atomic_write_text(BOARD, board)
 
-    # CURRENT.md is contested and is NOT a view. Refresh may only bump its timestamp when
-    # the caller actually holds a lease on it; otherwise refresh is views-only. Bumping it
-    # unleased was how a stale pointer got rejuvenated without anyone verifying anything.
+    # CURRENT is a journal projection after cutover. A refresh may redraw it only under a
+    # live lease; it never changes the journal context or verification timestamp.
     views_only = getattr(args, "views_only", False)
     agent = getattr(args, "agent", None) or "orchestrator"
-    run_id = getattr(args, "run", None)
+    run_id = getattr(args, "run", None) or os.environ.get("AVCOORD_RUN_ID")
     may_write_current = False
     if not views_only:
         for L in read_leases():
@@ -1228,6 +1421,13 @@ authority: {authority()}
         print("refreshed board + activeContext (views only)")
         return 0
 
+    resolved_run, _, run_error = resolve_run(args)
+    if run_error:
+        atomic_write_text(ACTIVE, _active_context(session_id))
+        print(f"FAIL: {run_error}", file=sys.stderr)
+        return 2
+    run_id = resolved_run
+
     if CURRENT.exists() and not may_write_current:
         atomic_write_text(ACTIVE, _active_context(session_id))
         audit("refresh_views_only", session_id=session_id, agent=agent, leases=len(leases))
@@ -1240,6 +1440,29 @@ authority: {authority()}
             file=sys.stderr,
         )
         return 2
+
+    if authority() == "journal":
+        if not run_id:
+            print("FAIL: journal CURRENT refresh requires --run and its token", file=sys.stderr)
+            return 2
+        try:
+            checked_run, run_token, proofs = _journal_credentials(args)
+            cw = journal_worker()
+            state = cw.fold(cw.read_prefix())
+            if not state.get("workspace", {}).get("context"):
+                raise RuntimeError("no workspace.context event exists; use `avcoord workspace set`")
+            cw.guarded_rebuild_projections(
+                agent_id=agent, run_id=checked_run, run_token=run_token,
+                lease_proofs=proofs, write_current=True,
+            )
+        except (ValueError, RuntimeError, PermissionError) as error:
+            print(f"FAIL: {error}", file=sys.stderr)
+            return 2
+        session_id = state["workspace"]["context"]["session_id"]
+        atomic_write_text(ACTIVE, _active_context(session_id))
+        audit("refresh", session_id=session_id, leases=len(leases), authority="journal")
+        print("refreshed board + journal CURRENT projection + activeContext")
+        return 0
 
     if CURRENT.exists():
         text = CURRENT.read_text(encoding="utf-8")
@@ -1269,7 +1492,7 @@ Session `{session_id}`. Run refresh after major handoffs.
     active = _active_context(session_id)
     atomic_write_text(ACTIVE, active)
     audit("refresh", session_id=session_id, leases=len(leases))
-    print("refreshed board + CURRENT + activeContext")
+    print("refreshed board + legacy CURRENT + activeContext")
     return 0
 
 
@@ -1380,7 +1603,6 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"threads active: {len(active)} / total {len(threads)}")
         for t in (active or threads)[:8]:
             print(f"  - {t.get('id')} [{t.get('status')}] {t.get('title')}")
-    audit("status", doctor=payload["doctor"], leases=len(leases))
     return 1 if doctor_issues else 0
 
 
@@ -1463,6 +1685,8 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues: list[str] = []
     warns: list[str] = []
+    if (ROOT / "AGENTVAULT_INSTALL_PENDING.json").exists():
+        issues.append("INSTALL_RECOVERY_REQUIRED: complete `avcoord init --target . --recover resume|rollback` before using this software version")
 
     for p in (COORD / "PROTOCOL.md", CURRENT, BOARD, NEXT_IDS, REGISTRY):
         if not p.exists():
@@ -1517,6 +1741,55 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         issues.append(f"STALE: CURRENT.md age {age:.1f}h > stale_after_hours {stale_h}")
     else:
         warns.append(f"CURRENT age {age:.1f}h (ok, threshold {stale_h}h)")
+
+    if authority() == "journal":
+        try:
+            cw = journal_worker()
+            events = cw.read_prefix()
+            seq, digest, journal_problems = cw.verify_chain()
+            if journal_problems:
+                issues.append(f"JOURNAL_INVALID: {journal_problems[0]}")
+            state = cw.fold(events)
+            proto = read_protocol()
+            committed = state.get("authority") or {}
+            if (committed.get("current") != "journal"
+                    or committed.get("epoch") != int(proto.get("epoch", 1))):
+                issues.append("JOURNAL_AUTHORITY_MISMATCH: protocol and committed authority disagree")
+            workspace = state.get("workspace") or {}
+            context = workspace.get("context")
+            if not context:
+                issues.append("JOURNAL_CONTEXT_MISSING: no workspace.context event")
+            if not workspace.get("last_verified_at"):
+                issues.append("JOURNAL_UNVERIFIED: no workspace.verified event")
+            current_text = CURRENT.read_text(encoding="utf-8") if CURRENT.is_file() else ""
+            raw_seq = extract_frontmatter_field(current_text, "journal_seq")
+            current_hash = extract_frontmatter_field(current_text, "journal_hash")
+            if not raw_seq or not raw_seq.isdigit() or not current_hash:
+                issues.append("JOURNAL_CURRENT_INVALID: CURRENT lacks journal sequence/hash metadata")
+            else:
+                current_seq = int(raw_seq)
+                by_seq = {event["seq"]: event["hash"] for event in events}
+                if current_seq < 1 or current_seq > seq or by_seq.get(current_seq) != current_hash:
+                    issues.append("JOURNAL_CURRENT_INVALID: CURRENT references no valid journal prefix")
+                required_seq = max(
+                    int((context or {}).get("journal_seq", 0)),
+                    int(workspace.get("verification_journal_seq", 0)),
+                )
+                if current_seq < required_seq:
+                    issues.append("JOURNAL_CURRENT_STALE: CURRENT predates workspace state")
+            expected_verified = workspace.get("last_verified_at") or "null"
+            if extract_frontmatter_field(current_text, "last_verified_at") != expected_verified:
+                issues.append("JOURNAL_CURRENT_INVALID: verification timestamp is not journal-derived")
+            meta_path = COORD / "projections" / "_meta.json"
+            meta = load_json(meta_path) if meta_path.is_file() else {}
+            if (meta.get("journal_seq") != seq or meta.get("journal_hash") != digest
+                    or meta.get("authority") != "journal"):
+                issues.append("JOURNAL_PROJECTION_STALE: projection metadata does not match journal head")
+            actual_current_hash = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+            if meta.get("current_sha256") != actual_current_hash:
+                issues.append("JOURNAL_CURRENT_TAMPERED: CURRENT hash differs from projection metadata")
+        except (OSError, ValueError, RuntimeError, TypeError) as error:
+            issues.append(f"JOURNAL_HEALTH_ERROR: {error}")
 
     for jp in (NEXT_IDS, REGISTRY):
         if jp.exists():
@@ -1605,7 +1878,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     status = "FAIL" if issues else "PASS"
     report = {"status": status, "issues": issues, "warnings": warns, "ts": iso()}
     print(json.dumps(report, indent=2))
-    audit("doctor", status=status, issues=issues)
     return 1 if issues else 0
 
 
@@ -1627,9 +1899,16 @@ def cmd_gate(args: argparse.Namespace) -> int:
         audit("gate", ok=False, results=results)
         return 1
 
-    test_roots = [ROOT / "scripts" / "coord" / "tests"]
-    if full or not paths or any("aeap" in p.replace("\\", "/") for p in paths):
-        test_roots.append(ROOT / "aeap" / "tests")
+    normalized_paths = [p.replace("\\", "/") for p in paths]
+    suites = [
+        ("scripts/coord", ROOT / "scripts" / "coord" / "tests"),
+        ("aeap", ROOT / "aeap" / "tests"),
+        ("scripts/catalog", ROOT / "scripts" / "catalog" / "tests"),
+        ("scripts/eval", ROOT / "scripts" / "eval" / "tests"),
+        ("scripts/release", ROOT / "scripts" / "release" / "tests"),
+    ]
+    test_roots = [test_root for prefix, test_root in suites
+                  if full or not paths or any(prefix in path for path in normalized_paths)]
 
     for tr in test_roots:
         if not tr.is_dir():
@@ -1669,23 +1948,28 @@ def cmd_gate(args: argparse.Namespace) -> int:
                 compile_roots.append(ROOT / "aeap")
             if "scripts/coord" in p.replace("\\", "/"):
                 compile_roots.append(ROOT / "scripts" / "coord")
+            for prefix in ("scripts/catalog", "scripts/eval", "scripts/release"):
+                if prefix in p.replace("\\", "/"):
+                    compile_roots.append(ROOT / prefix)
             pp = ROOT / p
             if pp.suffix == ".py" and pp.exists():
                 compile_roots.append(pp.parent)
     else:
-        compile_roots.extend([ROOT / "scripts" / "coord", ROOT / "aeap"])
+        compile_roots.extend([ROOT / "scripts" / "coord", ROOT / "aeap",
+                              ROOT / "scripts" / "catalog", ROOT / "scripts" / "eval",
+                              ROOT / "scripts" / "release"])
     seen: set[Path] = set()
     for cr in compile_roots:
         rp = cr.resolve()
         if rp in seen or not rp.exists():
             continue
         seen.add(rp)
-        r = subprocess.run(
-            [sys.executable, "-m", "compileall", "-q", str(rp)],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-        )
+        with tempfile.TemporaryDirectory(prefix="avcoord-pycache-") as pycache:
+            r = subprocess.run(
+                [sys.executable, "-m", "compileall", "-q", str(rp)],
+                cwd=str(ROOT), capture_output=True, text=True,
+                env={**os.environ, "PYTHONPYCACHEPREFIX": pycache},
+            )
         rel = str(rp.relative_to(ROOT)) if ROOT in rp.parents or rp == ROOT.resolve() else rp.name
         results.append({"step": f"compileall:{rel}", "rc": r.returncode})
         if r.returncode != 0:
@@ -2278,6 +2562,279 @@ def cmd_test(args: argparse.Namespace) -> int:
         shutil.rmtree(sandbox, ignore_errors=True)
 
 
+# --------------------------------------------------------------------------- AK-SPWS (ADR-009)
+
+
+def _load_avkernel():
+    """Import scripts/coord/avkernel as a package without requiring install."""
+    pkg_dir = Path(__file__).resolve().parent / "avkernel"
+    pkg_init = pkg_dir / "__init__.py"
+    name = "avkernel"
+    if name in sys.modules and getattr(sys.modules[name], "__file__", None) == str(pkg_init):
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        name,
+        pkg_init,
+        submodule_search_locations=[str(pkg_dir)],
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def cmd_hydrate(args: argparse.Namespace) -> int:
+    """JIT working-set digest — prefer this over dumping PROTOCOL + full commits."""
+    ak = _load_avkernel()
+
+    class _AvProxy:
+        ROOT = ROOT
+        COORD = COORD
+        iso = staticmethod(iso)
+        atomic_write_json = staticmethod(atomic_write_json)
+        __file__ = __file__
+
+    result = ak.hydrate.hydrate(
+        _AvProxy,
+        task_id=args.task or "",
+        budget=args.budget,
+        tags=args.tag or [],
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(result["digest"])
+        print(f"\n# token_estimate={result['token_estimate']} budget={result['budget']} "
+              f"head_seq={result['head_seq']}")
+    return 0
+
+
+def cmd_intent(args: argparse.Namespace) -> int:
+    ak = _load_avkernel()
+    try:
+        run_id, token, proofs = _journal_credentials(args)
+        receipt = ak.commit_rebased.intent_commit(
+            _journal_proxy(), agent_id=args.agent, note=args.note,
+            task_id=args.task_id or "", expect_slot=args.expect_slot,
+            idempotency_key=args.idempotency_key or "", run_id=run_id,
+            run_token=token, lease_proofs=proofs,
+        )
+    except (ValueError, RuntimeError, PermissionError) as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(receipt, indent=2, ensure_ascii=False))
+    return 0 if receipt.get("status") in ("committed", "duplicate") else 1
+
+
+def cmd_query(args: argparse.Namespace) -> int:
+    ak = _load_avkernel()
+
+    class _AvProxy:
+        ROOT = ROOT
+        COORD = COORD
+        iso = staticmethod(iso)
+        atomic_write_json = staticmethod(atomic_write_json)
+        __file__ = __file__
+
+    cw = journal_worker()
+    slot = next((v for v in ak.commit_rebased.journal_slots(cw) if v.get("id") == args.slot), None)
+    if slot is None:
+        print(json.dumps({"status": "missing", "slot": args.slot}))
+        return 1
+    print(json.dumps({"status": "ok", "slot": slot}, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_done(args: argparse.Namespace) -> int:
+    """Run gate; optionally compact if threshold met. Ambient post-task hook."""
+    gate_rc = cmd_gate(_ns(full=False, nav=False, paths=[]))
+    ak = _load_avkernel()
+
+    class _AvProxy:
+        ROOT = ROOT
+        COORD = COORD
+        iso = staticmethod(iso)
+        atomic_write_json = staticmethod(atomic_write_json)
+        atomic_write_text = staticmethod(atomic_write_text)
+        fsync_dir = staticmethod(fsync_dir)
+        FileLock = FileLock
+        audit = staticmethod(audit)
+        load_json = staticmethod(load_json)
+        canon_resource = staticmethod(canon_resource)
+        CanonError = CanonError
+        __file__ = __file__
+
+    check = ak.compact.should_compact(_AvProxy, force=False)
+    compact_receipt = None
+    if check.get("due"):
+        try:
+            run_id, token, proofs = _journal_credentials(args)
+            compact_receipt = ak.compact.compact(
+                _AvProxy, force=False, agent_id=args.agent, run_id=run_id,
+                run_token=token, lease_proofs=proofs)
+        except PermissionError as error:
+            compact_receipt = {"status": "error", "reason": str(error)}
+    out = {
+        "gate": gate_rc,
+        "task_id": args.task,
+        "compact_check": {k: check[k] for k in check if k != "problems"},
+        "compact": compact_receipt,
+    }
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    compact_failed = bool(compact_receipt and compact_receipt.get("status") not in {
+        "compacted", "skipped", "duplicate",
+    })
+    return 1 if gate_rc or compact_failed else 0
+
+
+def cmd_compact(args: argparse.Namespace) -> int:
+    ak = _load_avkernel()
+    try:
+        run_id, token, proofs = _journal_credentials(args)
+        receipt = ak.compact.compact(
+            _journal_proxy(), force=args.force, agent_id=args.agent, run_id=run_id,
+            run_token=token, lease_proofs=proofs)
+    except PermissionError as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(receipt, indent=2, ensure_ascii=False))
+    return 0 if receipt.get("status") in ("compacted", "skipped") else 1
+
+
+def cmd_fingerprint(args: argparse.Namespace) -> int:
+    ak = _load_avkernel()
+
+    class _AvProxy:
+        ROOT = ROOT
+        COORD = COORD
+        iso = staticmethod(iso)
+        atomic_write_json = staticmethod(atomic_write_json)
+        atomic_write_text = staticmethod(atomic_write_text)
+        fsync_dir = staticmethod(fsync_dir)
+        FileLock = FileLock
+        audit = staticmethod(audit)
+        load_json = staticmethod(load_json)
+        canon_resource = staticmethod(canon_resource)
+        CanonError = CanonError
+        __file__ = __file__
+
+    if args.fp_cmd == "status":
+        print(json.dumps(ak.fingerprint_eval.status(_AvProxy), indent=2))
+        return 0
+    if args.fp_cmd == "eval":
+        path = Path(args.path)
+        if not path.is_absolute():
+            path = ROOT / path
+        try:
+            run_id, token, proofs = _journal_credentials(args)
+            receipt = ak.fingerprint_eval.promote_or_reject(
+                _AvProxy, path, agent_id=args.agent, run_id=run_id,
+                run_token=token, lease_proofs=proofs,
+            )
+        except (ValueError, RuntimeError, PermissionError) as error:
+            print(f"FAIL: {error}", file=sys.stderr)
+            return 1
+        print(json.dumps(receipt, indent=2, ensure_ascii=False, default=str))
+        return 0 if receipt.get("status") == "approved" else 1
+    print(json.dumps({"error": f"unknown fingerprint subcommand {args.fp_cmd}"}))
+    return 1
+
+
+def _read_bounded_json(path_value: str, *, max_bytes: int = 1024 * 1024) -> dict:
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = ROOT / path
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("JSON input must be one regular file")
+    if path.stat().st_size > max_bytes:
+        raise ValueError(f"JSON input exceeds {max_bytes} bytes")
+    value = json.loads(path.read_bytes())
+    if not isinstance(value, dict):
+        raise ValueError("JSON input must contain one object")
+    return value
+
+
+def cmd_task(args: argparse.Namespace) -> int:
+    """Create, transition, or inspect journal-authoritative managed tasks."""
+    try:
+        state = journal_state()
+        if args.task_cmd == "list":
+            print(json.dumps({"tasks": list(state["tasks"].values())}, indent=2, ensure_ascii=False))
+            return 0
+        if args.task_cmd == "show":
+            task = state["tasks"].get(args.task_id)
+            if task is None:
+                print(json.dumps({"status": "missing", "task_id": args.task_id}))
+                return 1
+            print(json.dumps(task, indent=2, ensure_ascii=False))
+            return 0
+        if authority() != "journal":
+            raise RuntimeError("managed task writes require journal authority")
+        if args.task_cmd == "create":
+            body = _read_bounded_json(args.file)
+            receipt = _commit_journal(
+                args, "task.created", body,
+                idempotency_key=args.idempotency_key or f"task-created-{body.get('task_id', '')}",
+            )
+        elif args.task_cmd == "transition":
+            body = {"task_id": args.task_id, "status": args.status}
+            if args.note:
+                body["note"] = args.note
+            if args.evidence_ref:
+                body["evidence_refs"] = args.evidence_ref
+            if args.reviewer_receipt:
+                body["reviewer_receipt"] = args.reviewer_receipt
+            if args.integration_evidence:
+                body["integration_evidence"] = args.integration_evidence
+            if args.blocker:
+                body["blockers"] = args.blocker
+            receipt = _commit_journal(
+                args, "task.transition", body, idempotency_key=args.idempotency_key or "",
+            )
+        elif args.task_cmd == "review":
+            task = state["tasks"].get(args.task_id)
+            if task is None:
+                raise ValueError(f"unknown managed task {args.task_id}")
+            body = {
+                "task_id": args.task_id,
+                "task_revision": task.get("revision"),
+                "task_state_sha256": journal_worker().task_state_sha256(task),
+                "decision": args.decision,
+                "evidence_refs": args.evidence_ref,
+            }
+            receipt = _commit_journal(
+                args, "review.receipt", body, idempotency_key=args.idempotency_key or "",
+            )
+        else:
+            raise ValueError(f"unknown task command {args.task_cmd}")
+    except (OSError, ValueError, RuntimeError, PermissionError, json.JSONDecodeError) as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(receipt, indent=2, ensure_ascii=False))
+    return 0 if receipt.get("status") in {"committed", "duplicate"} else 1
+
+
+def cmd_workspace(args: argparse.Namespace) -> int:
+    """Set or inspect the journal context projected as CURRENT.md."""
+    try:
+        if args.workspace_cmd == "show":
+            print(json.dumps(journal_state()["workspace"], indent=2, ensure_ascii=False))
+            return 0
+        if args.workspace_cmd != "set":
+            raise ValueError(f"unknown workspace command {args.workspace_cmd}")
+        body = _read_bounded_json(args.file)
+        receipt = _commit_journal(
+            args, "workspace.context", body,
+            idempotency_key=args.idempotency_key or "",
+        )
+    except (OSError, ValueError, RuntimeError, PermissionError, json.JSONDecodeError) as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(receipt, indent=2, ensure_ascii=False))
+    return 0 if receipt.get("status") in {"committed", "duplicate"} else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="avcoord",
@@ -2325,6 +2882,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Task id recorded on the transition event")
     co.add_argument("--dry-run", action="store_true", dest="dry_run")
     co.add_argument("--force", action="store_true", help="cut over despite other live leases")
+    co.add_argument("--run", required=True, help="Registered maintenance run")
 
     rp = sub.add_parser("reap", help="Remove expired leases (the only command that does)")
     rp.add_argument("--agent", default="orchestrator")
@@ -2417,11 +2975,103 @@ def build_parser() -> argparse.ArgumentParser:
 
     ini = sub.add_parser("init", help="Scaffold AgentVault into a target directory (from portable template)")
     ini.add_argument("--target", default=".", help="Destination project root (default: cwd)")
-    ini.add_argument("--force", action="store_true", help="Overwrite existing files")
-    ini.add_argument("--full", action="store_true", help="Include OpenViking + GraphRAG + VectorRAG stubs")
+    ini.add_argument("--force", action="store_true", help="Deprecated: unsafe overwrites are rejected; use --upgrade")
+    ini.add_argument("--full", action="store_true", help="Add OpenViking + GraphRAG + VectorRAG to the default core")
+    ini.add_argument("--with-aeap", action="store_true", help="Add the optional AEAP development extension (admission remains disabled)")
+    ini.add_argument("--upgrade", action="store_true", help="Upgrade unchanged managed software; preserve user state and local overrides")
+    ini.add_argument("--rollback", metavar="RECEIPT", help="Restore 'latest' or a retained receipt digest; preserve all user state")
+    ini.add_argument("--recover", choices=("resume", "rollback"), help="Resume or undo a retained interrupted software transaction")
+    ini.add_argument("--override", action="append", default=[], metavar="PATH", help="Declare a path project-owned; never overwrite it on upgrades")
+    ini.add_argument("--dry-run", "--preview", dest="dry_run", action="store_true", help="Print a write-free plan; conflicts exit nonzero")
 
     rot = sub.add_parser("rotate-events", help="HOT→WARM: archive old events.jsonl lines; keep last N")
     rot.add_argument("--keep", type=int, default=50, help="HOT retention (default 50)")
+
+    # AK-SPWS verbs (ADR-009) — minimal cognitive surface.
+    hy = sub.add_parser("hydrate", help="JIT working-set digest (snapshot+δ+rules); prefer over PROTOCOL dump")
+    hy.add_argument("--task", default="", help="Focus task id")
+    hy.add_argument("--budget", type=int, default=None, help="Token budget (default from kernel config)")
+    hy.add_argument("--tag", action="append", default=[], help="Rule tags to prefer (repeatable)")
+    hy.add_argument("--json", action="store_true", help="Print full JSON envelope")
+
+    intent = sub.add_parser("intent", help="Record intent with optional slot CAS + journal rebase")
+    intent.add_argument("--agent", required=True)
+    intent.add_argument("--note", required=True)
+    intent.add_argument("--task-id", default="", dest="task_id")
+    intent.add_argument("--expect-slot", default=None, dest="expect_slot",
+                        help="kind:id=vN — CAS before journal")
+    intent.add_argument("--idempotency-key", default="", dest="idempotency_key")
+    intent.add_argument("--run", required=True)
+
+    task = sub.add_parser("task", help="Journal-authoritative managed task lifecycle")
+    task_sub = task.add_subparsers(dest="task_cmd", required=True)
+    task_create = task_sub.add_parser("create", help="Create from a complete task contract JSON")
+    task_create.add_argument("--file", required=True)
+    task_create.add_argument("--agent", required=True)
+    task_create.add_argument("--run", required=True)
+    task_create.add_argument("--idempotency-key", default="", dest="idempotency_key")
+    task_transition = task_sub.add_parser("transition", help="Advance one managed task")
+    task_transition.add_argument("--task-id", required=True, dest="task_id")
+    task_transition.add_argument("--status", required=True, choices=[
+        "ready", "claimed", "in_progress", "review", "verified", "integrated",
+        "blocked", "cancelled",
+    ])
+    task_transition.add_argument("--agent", required=True)
+    task_transition.add_argument("--run", required=True)
+    task_transition.add_argument("--note", default="")
+    task_transition.add_argument("--evidence-ref", action="append", default=[])
+    task_transition.add_argument("--reviewer-receipt", default="")
+    task_transition.add_argument("--integration-evidence", action="append", default=[])
+    task_transition.add_argument("--blocker", action="append", default=[])
+    task_transition.add_argument("--idempotency-key", default="", dest="idempotency_key")
+    task_review = task_sub.add_parser("review", help="Commit an independent review receipt")
+    task_review.add_argument("--task-id", required=True, dest="task_id")
+    task_review.add_argument("--decision", required=True, choices=["ACK", "BLOCK"])
+    task_review.add_argument("--evidence-ref", action="append", required=True)
+    task_review.add_argument("--agent", required=True)
+    task_review.add_argument("--run", required=True)
+    task_review.add_argument("--idempotency-key", default="", dest="idempotency_key")
+    task_show = task_sub.add_parser("show", help="Read one managed task projection")
+    task_show.add_argument("--task-id", required=True, dest="task_id")
+    task_sub.add_parser("list", help="List managed task projections")
+
+    workspace = sub.add_parser("workspace", help="Journal context projected as CURRENT.md")
+    workspace_sub = workspace.add_subparsers(dest="workspace_cmd", required=True)
+    workspace_set = workspace_sub.add_parser("set", help="Commit a workspace.context JSON object")
+    workspace_set.add_argument("--file", required=True)
+    workspace_set.add_argument("--agent", required=True)
+    workspace_set.add_argument("--run", required=True)
+    workspace_set.add_argument("--idempotency-key", default="", dest="idempotency_key")
+    workspace_sub.add_parser("show", help="Read the folded workspace context")
+
+    q = sub.add_parser("query", help="Read one kernel slot")
+    q.add_argument("--slot", required=True, help="kind:id")
+
+    done = sub.add_parser("done", help="Run gate; compact if threshold met (post-task)")
+    done.add_argument("--task", required=True)
+    done.add_argument("--agent", default="orchestrator")
+    done.add_argument("--run", required=True)
+
+    comp = sub.add_parser("compact", help="Snapshot journal if due (or --force)")
+    comp.add_argument("--force", action="store_true")
+    comp.add_argument("--agent", default="orchestrator")
+    comp.add_argument("--run", required=True)
+
+    fp = sub.add_parser("fingerprint", help="Hypothesis/Candidate/Approved promotion eval")
+    fps = fp.add_subparsers(dest="fp_cmd", required=True)
+    fe = fps.add_parser("eval", help="Evaluate Candidate file; promote or reject")
+    fe.add_argument("path", help="Path to candidate JSON")
+    fe.add_argument("--agent", default="orchestrator")
+    fe.add_argument("--run", required=True)
+    fps.add_parser("status", help="Count fingerprint stages")
+    def credentials(parser):
+        if any(a.dest == "run" for a in parser._actions):
+            parser.add_argument("--run-token", help="run secret (or AVCOORD_RUN_TOKEN)")
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for child in action.choices.values():
+                    credentials(child)
+    credentials(p)
     return p
 
 
@@ -2437,7 +3087,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if not CURRENT.exists():
         print("FAIL: MemoryBank/CURRENT.md does not exist", file=sys.stderr)
         return 1
-    run_id = getattr(args, "run", None)
+    run_id, _, error = resolve_run(args)
+    if error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        return 1
     holds = any(
         _same_principal(L, args.agent, run_id)
         and any(lease_authorizes(r, "MemoryBank/CURRENT.md") for r in L.get("resources") or [])
@@ -2449,6 +3102,26 @@ def cmd_verify(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    if authority() == "journal":
+        try:
+            if not journal_state().get("workspace", {}).get("context"):
+                raise RuntimeError("no workspace.context event exists; use `avcoord workspace set` first")
+            receipt = _commit_journal(
+                args, "workspace.verified", {"note": args.note},
+                idempotency_key="",
+            )
+        except (ValueError, RuntimeError, PermissionError) as error:
+            print(f"FAIL: {error}", file=sys.stderr)
+            return 1
+        if receipt.get("status") not in {"committed", "duplicate"}:
+            print(json.dumps(receipt, indent=2, ensure_ascii=False))
+            return 1
+        workspace = journal_state()["workspace"]
+        print(json.dumps({"ok": True, "last_verified_at": workspace["last_verified_at"],
+                          "note": args.note, "journal": receipt}, indent=2))
+        return 0
+
+    # Before journal cutover, CURRENT itself remains the selected legacy authority.
     stamp = iso()
     text = CURRENT.read_text(encoding="utf-8")
     m = re.match(r"^(---\r?\n)(.*?)(\r?\n---\s*\r?\n)", text, re.S)
@@ -2472,98 +3145,195 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_cutover(args: argparse.Namespace) -> int:
-    """P07 — move operational authority from the legacy files to the commit journal.
+    """Change authority in one fenced event and preserve complete recovery evidence."""
+    if args.force:
+        print("FAIL: --force is disabled; authority changes require a fully drained workspace",
+              file=sys.stderr)
+        return 1
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", args.rfc):
+        print("FAIL: invalid RFC identifier", file=sys.stderr)
+        return 1
+    try:
+        run_id, run_token, proofs = _journal_credentials(args)
+    except PermissionError as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        return 1
 
-    One field flips. Because P03 never overwrote a legacy file, rolling back is a config
-    change plus a regenerate, not a restore from backup, and every post-cutover commit
-    survives the rollback.
-    """
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "_cw", Path(__file__).resolve().parent / "commit_worker.py")
-    cw = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(cw)
-
+    cw = journal_worker()
     proto = read_protocol()
     target = args.to
     current = proto.get("authority", "legacy")
-    if current == target:
-        print(f"authority is already {target!r}; nothing to do")
-        return 0
-
-    # --- preflight: refuse to cut over onto a journal that is not clean.
     valid_seq, head_hash, problems = cw.verify_chain()
     if problems:
         print(f"FAIL: journal is not clean: {problems[0]}", file=sys.stderr)
         return 1
+    committed_authority = cw.fold(cw.read_prefix())["authority"]
+    if current == target:
+        if (committed_authority["current"] != target
+                or committed_authority["epoch"] != int(proto.get("epoch", 1))):
+            print("FAIL: protocol and committed authority disagree", file=sys.stderr)
+            return 1
+        if target == "journal":
+            state = cw.fold(cw.read_prefix())
+            if not state.get("workspace", {}).get("context"):
+                print("FAIL: journal authority has no workspace.context event", file=sys.stderr)
+                return 1
+            if args.dry_run:
+                print(json.dumps({"status": "dry_run", "authority": target,
+                                  "would_rebuild": ["MemoryBank/coord/projections/**",
+                                                    "MemoryBank/CURRENT.md"]}, indent=2))
+                return 0
+            try:
+                cw.guarded_rebuild_projections(
+                    agent_id=args.agent, run_id=run_id, run_token=run_token,
+                    lease_proofs=proofs, write_current=True,
+                )
+            except (ValueError, RuntimeError, PermissionError) as error:
+                print(f"FAIL: {error}", file=sys.stderr)
+                return 1
+            print(f"authority is already {target!r}; journal projections repaired and verified")
+            return 0
+        print(f"authority is already {target!r}; journal and epoch agree")
+        return 0
     if target == "journal" and valid_seq == 0:
         print("FAIL: journal is empty; import legacy state before cutting over", file=sys.stderr)
         return 1
-
-    # --- drain: no live lease may be held by anyone but the cutover operator.
-    others = [L for L in read_leases() if L.get("agent_id") != args.agent]
-    if others and not args.force:
-        for L in others:
-            print(f"FAIL: lease held by {L.get('agent_id')} on {L.get('resources')} "
-                  f"until {L.get('expires_at')}", file=sys.stderr)
-        print("drain the workers or pass --force", file=sys.stderr)
+    if target == "journal" and not cw.fold(cw.read_prefix()).get("workspace", {}).get("context"):
+        print("FAIL: stage workspace context with `avcoord workspace set` before cutover",
+              file=sys.stderr)
         return 1
 
-    # --- snapshot legacy mutable state read-only before it becomes derived.
-    mig = COORD / "migrations" / args.rfc / "cutover"
-    mig.mkdir(parents=True, exist_ok=True)
-    snapshot = {}
-    for rel in ("MemoryBank/coord/threads.json", "MemoryBank/CURRENT.md", "MemoryBank/board.md",
-                "MemoryBank/activeContext.md"):
-        src = ROOT / rel
-        if src.exists():
-            body = src.read_bytes()
-            h = hashlib.sha256(body).hexdigest()
-            (mig / f"{Path(rel).name}.{h[:12]}").write_bytes(body)
-            snapshot[rel] = h
-    atomic_write_json(mig / "pre-cutover-snapshot.json", {
-        "captured_at": iso(), "from_authority": current, "to_authority": target,
-        "journal_seq": valid_seq, "journal_head_hash": head_hash, "files": snapshot,
-        "note": "Read-only recovery material. Never a live boot target.",
-    })
+    others = [lease for lease in read_leases()
+              if not _same_principal(lease, args.agent, run_id)]
+    if others:
+        for lease in others:
+            print(f"FAIL: lease held by {lease.get('agent_id')} on {lease.get('resources')} "
+                  f"until {lease.get('expires_at')}", file=sys.stderr)
+        return 1
+
+    epoch_from = int(proto.get("epoch", 1))
+    epoch_to = epoch_from + 1
+    kind = "pre-cutover-snapshot" if target == "journal" else "post-cutover-export"
+    recovery_rel = (f"MemoryBank/coord/migrations/{args.rfc}/cutover/"
+                    f"{kind}-epoch-{epoch_from}-to-{epoch_to}.json")
+    recovery_path = ROOT / recovery_rel
+    if target == "journal":
+        files = {}
+        for rel in ("MemoryBank/coord/threads.json", "MemoryBank/CURRENT.md",
+                    "MemoryBank/board.md", "MemoryBank/activeContext.md"):
+            source = ROOT / rel
+            if source.is_file() and not source.is_symlink():
+                raw = source.read_bytes()
+                files[rel] = {"sha256": hashlib.sha256(raw).hexdigest(),
+                              "content_base64": base64.b64encode(raw).decode("ascii")}
+        recovery_doc = {"schema_version": "2.0", "kind": kind, "captured_at": iso(),
+                        "from_authority": current, "to_authority": target,
+                        "epoch_from": epoch_from, "epoch_to": epoch_to,
+                        "journal_seq": valid_seq, "journal_hash": head_hash, "files": files,
+                        "note": "Recovery evidence only; never a live boot target."}
+    else:
+        payloads = {}
+        for path in sorted(cw.payloads_dir().glob("*.json")):
+            if path.is_symlink() or not path.is_file():
+                print(f"FAIL: invalid journal payload path {path}", file=sys.stderr)
+                return 1
+            raw = path.read_bytes()
+            payloads[path.name] = {"sha256": hashlib.sha256(raw).hexdigest(),
+                                   "content_base64": base64.b64encode(raw).decode("ascii")}
+        events = cw.read_prefix()
+        recovery_doc = {"schema_version": "2.0", "kind": kind, "captured_at": iso(),
+                        "from_authority": current, "to_authority": target,
+                        "epoch_from": epoch_from, "epoch_to": epoch_to,
+                        "journal_seq": valid_seq, "journal_hash": head_hash,
+                        "events": events, "payloads": payloads, "folded_state": cw.fold(events),
+                        "note": "Complete legacy handoff; journal history remains preserved."}
+
+    if recovery_path.exists():
+        if recovery_path.is_symlink() or not recovery_path.is_file():
+            print("FAIL: recovery artifact path is not a regular file", file=sys.stderr)
+            return 1
+        recovery_raw = recovery_path.read_bytes()
+        try:
+            existing_doc = json.loads(recovery_raw)
+        except json.JSONDecodeError:
+            print("FAIL: existing recovery artifact is invalid JSON", file=sys.stderr)
+            return 1
+        expected_shape = (existing_doc.get("from_authority"), existing_doc.get("to_authority"),
+                          existing_doc.get("epoch_from"), existing_doc.get("epoch_to"))
+        if expected_shape != (current, target, epoch_from, epoch_to):
+            print("FAIL: existing recovery artifact belongs to a different transition", file=sys.stderr)
+            return 1
+        recovery_doc = existing_doc
+    else:
+        recovery_raw = (json.dumps(recovery_doc, indent=2, ensure_ascii=False) + "\n").encode()
+    recovery_hash = "sha256:" + hashlib.sha256(recovery_raw).hexdigest()
+    body = {"from_authority": current, "to_authority": target,
+            "epoch_from": epoch_from, "epoch_to": epoch_to,
+            "recovery_artifact": recovery_rel,
+            "recovery_artifact_sha256": recovery_hash}
+    idempotency_key = f"authority-e{epoch_from}-{current}-to-{target}"
 
     if args.dry_run:
-        print(json.dumps({"status": "dry_run", "from": current, "to": target,
-                          "journal_seq": valid_seq, "snapshot": snapshot}, indent=2))
+        print(json.dumps({"status": "dry_run", **body, "journal_seq": valid_seq,
+                          "journal_hash": head_hash, "would_write": [recovery_rel]}, indent=2))
         return 0
 
-    # --- commit the transition, then flip the epoch.
-    receipt = cw.commit("task.transition", {
-        "task_id": args.task_id,
-        "status": "authority_cutover",
-        "from_authority": current, "to_authority": target,
-        "epoch_from": proto.get("epoch", 1), "epoch_to": int(proto.get("epoch", 1)) + 1,
-        "pre_cutover_snapshot": str((mig / "pre-cutover-snapshot.json").relative_to(ROOT)),
-        "legacy_file_hashes": snapshot,
-    }, agent_id=args.agent, task_id=args.task_id,
-       # The epoch is part of the key: a later, legitimate cutover in the same direction
-       # is a DIFFERENT event. Without it the second flip silently returned the first
-       # flip's receipt and recorded nothing.
-       idempotency_key=f"cutover-e{proto.get('epoch', 1)}-{current}-to-{target}")
+    if not any(any(lease_authorizes(resource, recovery_rel)
+                       for resource in lease.get("resources") or []) for lease in proofs):
+        print(f"FAIL: missing live lease authorizing {recovery_rel}", file=sys.stderr)
+        return 1
 
-    proto.update({
-        "epoch": int(proto.get("epoch", 1)) + 1,
-        "authority": target,
-        "last_updated": iso(),
-        "cutover_commit_seq": receipt.get("seq"),
-        "cutover_snapshot": str((mig / "pre-cutover-snapshot.json").relative_to(ROOT)),
-    })
-    atomic_write_json(COORD / "protocol.json", proto)
-    cw.rebuild_projections()
-    audit("authority_cutover", **{"from": current, "to": target, "epoch": proto["epoch"],
-                                  "seq": receipt.get("seq")})
-    print(json.dumps({"status": "cutover_complete", "from": current, "to": target,
-                      "epoch": proto["epoch"], "journal_seq": receipt.get("seq"),
-                      "snapshot": str((mig / "pre-cutover-snapshot.json").relative_to(ROOT))},
-                     indent=2))
-    print("\nNow regenerate views:  python3 scripts/coord/avcoord.py refresh --views-only",
-          file=sys.stderr)
+    with coord_lock():
+        latest = read_protocol()
+        if (latest.get("authority", "legacy"), int(latest.get("epoch", 1))) != (current, epoch_from):
+            print("FAIL: protocol changed after preflight", file=sys.stderr)
+            return 1
+        # Claims serialize on this same lock. Repeating the drain here closes the window
+        # in which another worker could start after preflight and be cut over underneath.
+        locked_others = [lease for lease in read_leases()
+                         if not _same_principal(lease, args.agent, run_id)]
+        if locked_others:
+            for lease in locked_others:
+                print(f"FAIL: lease acquired during cutover by {lease.get('agent_id')} on "
+                      f"{lease.get('resources')} until {lease.get('expires_at')}", file=sys.stderr)
+            return 1
+        try:
+            cw.authorize(cw.required_resources("authority.changed", body) + [recovery_rel],
+                         args.agent, run_id, run_token, proofs)
+        except (ValueError, RuntimeError, PermissionError) as error:
+            print(f"FAIL: {error}", file=sys.stderr)
+            return 1
+        if recovery_path.exists():
+            if recovery_path.read_bytes() != recovery_raw:
+                print("FAIL: recovery artifact changed after preflight", file=sys.stderr)
+                return 1
+        else:
+            recovery_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(recovery_path, recovery_raw.decode("utf-8"))
+
+        existing = next((event for event in cw.read_prefix()
+                         if event.get("idempotency_key") == idempotency_key), None)
+        if existing is not None:
+            if existing.get("body") != body:
+                print("FAIL: prior authority event conflicts with recovery artifact", file=sys.stderr)
+                return 1
+            receipt = {"status": "duplicate", "seq": existing["seq"], "hash": existing["hash"]}
+        else:
+            receipt = _commit_journal(args, "authority.changed", body,
+                                      resources=[recovery_rel], idempotency_key=idempotency_key)
+        if receipt.get("status") not in {"committed", "duplicate"}:
+            print(json.dumps(receipt, indent=2), file=sys.stderr)
+            return 1
+        proto.update({"epoch": epoch_to, "authority": target, "last_updated": iso(),
+                      "cutover_commit_seq": receipt.get("seq"),
+                      "cutover_recovery_artifact": recovery_rel})
+        atomic_write_json(COORD / "protocol.json", proto)
+        cw.rebuild_projections(write_current=target == "journal")
+
+    audit("authority_cutover", **{"from": current, "to": target, "epoch": epoch_to,
+                                  "seq": receipt.get("seq"), "recovery": recovery_rel})
+    print(json.dumps({"status": "cutover_complete", **body,
+                      "journal_seq": receipt.get("seq")}, indent=2))
     return 0
 
 
@@ -2573,7 +3343,7 @@ def cmd_reap(args: argparse.Namespace) -> int:
     Reaping used to happen inside read_live_leases(), so every status / doctor /
     check-lease call silently deleted lease files, concurrently with a lock-holding claim.
     """
-    with FileLock(LEASES / ".claim.lock"):
+    with coord_lock():
         before = len(list(LEASES.glob("*.json")))
         live = read_leases(reap=True)
     print(json.dumps({"live": len(live), "reaped": before - len(list(LEASES.glob("*.json")))}, indent=2))
@@ -2606,7 +3376,10 @@ def cmd_check_lease(args: argparse.Namespace) -> int:
     if not path_is_contested(rel):
         print(json.dumps({"ok": True, "contested": False, "path": rel}))
         return 0
-    run_id = getattr(args, "run", None)
+    run_id, _, error = resolve_run(args)
+    if error:
+        print(json.dumps({"ok": False, "error": error}), file=sys.stderr)
+        return 1
     for L in read_leases():
         if not _same_principal(L, args.agent, run_id):
             continue
@@ -2621,89 +3394,685 @@ def cmd_check_lease(args: argparse.Namespace) -> int:
 
 
 def _portable_template_root() -> Path:
-    return REPO_ROOT / "templates" / "agentvault-portable"
+    """A release works as an exported root; the private development tree keeps it nested."""
+    nested = REPO_ROOT / "templates" / "agentvault-portable"
+    if nested.is_dir():
+        return nested
+    if (REPO_ROOT / "RELEASE.json").is_file():
+        return REPO_ROOT
+    raise ValueError("no portable RELEASE.json found; run init from an unpacked AgentVault release")
 
 
-def _copy_file(src: Path, dest: Path, *, force: bool) -> str:
+_INSTALL_RECEIPT = "AGENTVAULT_INSTALL.json"
+_INSTALL_HISTORY = "AGENTVAULT_INSTALL_HISTORY"
+_INSTALL_PENDING = "AGENTVAULT_INSTALL_PENDING.json"
+_INSTALL_CACHE_NAMES = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".git"}
+_INSTALL_USER_PREFIXES = ("MemoryBank/", "EpisodicTracker/", "OpenViking/", "GraphRAG/",
+                          "VectorRAG/", "docs/", "reports/", "aeap/policies/")
+
+
+def _install_rel(value: str) -> str:
+    if (not isinstance(value, str) or not value or "\\" in value or "\x00" in value
+            or Path(value).is_absolute() or Path(value).as_posix() != value
+            or any(part in {".", ".."} for part in value.split("/"))
+            or re.match(r"^[A-Za-z]:", value)):
+        raise ValueError(f"unsafe release path: {value!r}")
+    return value
+
+
+def _install_cache(rel: str) -> bool:
+    p = Path(rel)
+    return bool(set(p.parts) & _INSTALL_CACHE_NAMES or p.name in {".DS_Store"}
+                or p.suffix in {".pyc", ".pyo"})
+
+
+def _install_destination(target: Path, rel: str) -> Path:
+    """Reject destination symlinks, including an intermediate user-controlled directory."""
+    out = target / _install_rel(rel)
+    for part in [out, *out.parents]:
+        if part == target.parent:
+            break
+        if part.is_symlink():
+            raise ValueError(f"symlink destination is not installable: {part}")
+        if part != out and part.exists() and not part.is_dir():
+            raise ValueError(f"destination parent is not a directory: {part}")
+    if out.exists() and not out.is_file():
+        raise ValueError(f"destination is not a regular file: {out}")
+    return out
+
+
+def _install_release(src: Path) -> tuple[dict, str, dict]:
+    manifest_path = src / "RELEASE.json"
+    if manifest_path.is_symlink():
+        raise ValueError("release manifest must be a regular file")
+    raw = manifest_path.read_bytes()
+    manifest = json.loads(raw)
+    if manifest.get("schema_version") not in {"1.0", "2.0"}:
+        raise ValueError("unsupported release manifest schema")
+    if manifest.get("schema_version") == "2.0" and (
+            manifest.get("state_schema") != "agentvault-v1"
+            or not isinstance(manifest.get("version"), str) or not manifest["version"].strip()):
+        raise ValueError("schema 2 releases require explicit version and supported state_schema pins")
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not files or manifest.get("file_count", len(files)) != len(files):
+        raise ValueError("release requires a complete files/hash manifest")
+    result, aliases = {}, set()
+    for rel, expected in sorted(files.items()):
+        rel = _install_rel(rel)
+        alias = unicodedata.normalize("NFC", rel).casefold()
+        if alias in aliases:
+            raise ValueError(f"release contains colliding path aliases: {rel}")
+        aliases.add(alias)
+        if _install_cache(rel):
+            raise ValueError(f"release manifest must not contain runtime debris: {rel}")
+        if not isinstance(expected, str) or not re.fullmatch("[a-f0-9]{64}", expected):
+            raise ValueError(f"invalid release hash: {rel}")
+        path = src / rel
+        for parent in path.parents:
+            if parent == src:
+                break
+            if parent.is_symlink():
+                raise ValueError(f"release path traverses a symlink: {rel}")
+        if path.is_symlink() and not (rel == "CLAUDE.md" and os.readlink(path) == "AGENTS.md"):
+            raise ValueError(f"unexpected release symlink: {rel}")
+        if not path.is_file():
+            raise ValueError(f"release file is missing: {rel}")
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != expected:
+            raise ValueError(f"release hash mismatch: {rel}")
+        mode = manifest.get("file_modes", {}).get(rel)
+        if mode is None:
+            mode = "0755" if path.stat().st_mode & 0o111 else "0644"
+        if mode not in {"0644", "0755"}:
+            raise ValueError(f"unsupported release mode for {rel}: {mode!r}")
+        result[rel] = {"data": data, "sha256": expected, "mode": mode}
+    required = {"scripts/coord/avcoord.py", "bin/avcoord", "MemoryBank/CURRENT.md",
+                "MemoryBank/coord/PROTOCOL.md", "MemoryBank/agents/registry.json"}
+    if not required <= files.keys():
+        raise ValueError(f"release lacks mandatory core files: {sorted(required - files.keys())}")
+    if manifest.get("payload_sha256"):
+        # Schema 2 hashes the sorted path/hash/mode records, independently of release time.
+        payload = [{"path": p, "sha256": x["sha256"], "mode": x["mode"]} for p, x in result.items()]
+        actual = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        if actual != manifest["payload_sha256"]:
+            raise ValueError("release payload digest mismatch")
+    return manifest, hashlib.sha256(raw).hexdigest(), result
+
+
+def _install_profile(rel: str, profiles: set[str]) -> bool:
+    if rel.startswith("aeap/") or rel == "requirements-aeap.txt":
+        return "aeap" in profiles
+    if rel.startswith(("OpenViking/", "GraphRAG/", "VectorRAG/")):
+        return "full" in profiles
+    root_files = {"AGENTS.md", "AGENTS.codex.md", "ADOPT.md", "GEMINI.md", "CLAUDE.md", "README.md",
+                  ".cursorrules", ".windsurfrules", ".gitignore", "requirements-core.txt", "pyproject.toml"}
+    return rel in root_files or rel.startswith((".agentvault/", ".config/", ".cursor/", ".githooks/",
+                                               ".github/", "bin/", "scripts/",
+                                               "MemoryBank/", "EpisodicTracker/"))
+
+
+def _install_seeds(stamp: str) -> dict[str, bytes]:
+    current = f'''---
+version: 1.0
+priority: P0
+last_updated: {stamp}
+last_verified_at: {stamp}
+session_id: sess-init
+stale_after_hours: 48
+type: current_pointer
+---
+# CURRENT
+
+## Session
+- **session_id:** `sess-init`
+- **Detail:** `MemoryBank/sessions/sess-init.md`
+
+## Active ETS
+- Initialize this project's brief and technical context.
+
+## Status
+`ACTIVE` — fresh AgentVault instance; AEAP admission disabled.
+
+## Next
+Edit `MemoryBank/projectbrief.md` and `MemoryBank/techContext.md`; run `bin/avcoord doctor`.
+'''
+    session = f'''---
+session_id: sess-init
+created: {stamp}
+agent: orchestrator
+status: active
+---
+# Session: initialization
+
+Installed the selected AgentVault release. Fill projectbrief and techContext before work.
+'''
+    seed = {"MemoryBank/CURRENT.md": current.encode(), "MemoryBank/sessions/sess-init.md": session.encode(),
+            "MemoryBank/board.md": f"---\ngenerated_at: {stamp}\ntype: blackboard\n---\n# Coordination Board\n\nNo open threads. Run `bin/avcoord refresh --views-only`.\n".encode(),
+            "MemoryBank/activeContext.md": f"---\ngenerated_at: {stamp}\ntype: derived_context\n---\n# Active Context\n\nFresh instance; no active task transitions.\n".encode(),
+            "MemoryBank/coord/audit.jsonl": b"", "EpisodicTracker/events.jsonl": b""}
+    values = {"MemoryBank/coord/next_ids.json": {"progress": 1, "episode": 1, "message": 1},
+              "MemoryBank/coord/threads.json": {"schema_version": "1.0", "last_updated": stamp, "threads": []},
+              "MemoryBank/coord/protocol.json": {"schema_version": "1.0", "epoch": 1, "authority": "legacy",
+                "notes": "Fresh instance; journal cutover requires explicit maintenance and independent review."}}
+    seed.update({p: (json.dumps(v, indent=2) + "\n").encode() for p, v in values.items()})
+    return seed
+
+
+def _install_software_digest(managed: dict) -> str:
+    payload = [{"path": p, **meta} for p, meta in sorted(managed.items())]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _install_validate_receipt(receipt: dict) -> None:
+    if (receipt.get("schema_version") != "1.0" or not isinstance(receipt.get("managed_files"), dict)
+            or receipt.get("state_schema") != "agentvault-v1"):
+        raise ValueError("unrecognized installed-software receipt/state schema; explicit migration required")
+    for rel, meta in receipt["managed_files"].items():
+        _install_rel(rel)
+        if rel.startswith(_INSTALL_USER_PREFIXES) or not _install_profile(rel, {"core", "full", "aeap"}):
+            raise ValueError(f"receipt incorrectly claims user-owned state as managed: {rel}")
+        if (not isinstance(meta, dict) or not re.fullmatch("[a-f0-9]{64}", meta.get("sha256", ""))
+                or meta.get("mode") not in {"0644", "0755"}):
+            raise ValueError(f"invalid managed-file metadata: {rel}")
+    if _install_software_digest(receipt["managed_files"]) != receipt.get("installed_artifact_sha256"):
+        raise ValueError("installed-software receipt digest mismatch")
+    if set(receipt["managed_files"]) & set(receipt.get("user_owned_files", [])):
+        raise ValueError("a file cannot be both managed and user-owned")
+
+
+def _install_drift(target: Path, receipt: dict, *, overrides=()) -> list[dict]:
+    conflicts = []
+    for rel, meta in receipt["managed_files"].items():
+        if rel in overrides:
+            continue
+        p = _install_destination(target, rel)
+        observed = hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None
+        mode = ("0755" if p.stat().st_mode & 0o111 else "0644") if p.exists() else None
+        if observed != meta["sha256"] or mode != meta["mode"]:
+            conflicts.append({"path": rel, "reason": "managed file changed locally",
+                              "installed_sha256": meta["sha256"], "observed_sha256": observed,
+                              "installed_mode": meta["mode"], "observed_mode": mode})
+    return conflicts
+
+
+def _install_write_bytes(dest: Path, data: bytes, mode: str = "0644") -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and not force:
-        return "skip"
-    shutil.copy2(src, dest)
-    return "wrote"
+    fd, staging = tempfile.mkstemp(prefix=".agentvault-install-", dir=dest.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(staging, int(mode, 8))
+        os.replace(staging, dest)
+        fsync_dir(dest.parent)
+    finally:
+        Path(staging).unlink(missing_ok=True)
 
+
+def _install_save_history(target: Path, raw_receipt: bytes, plan: dict, *, overrides=()) -> str:
+    """Archive a complete verified software image; never back up project memory as code."""
+    rec = json.loads(raw_receipt)
+    history_id = hashlib.sha256(raw_receipt).hexdigest()
+    base = f"{_INSTALL_HISTORY}/{history_id}"
+    artifacts = {f"{base}/receipt.json": raw_receipt,
+                 f"{base}/plan.json": (json.dumps(plan, indent=2) + "\n").encode()}
+    for rel, meta in rec["managed_files"].items():
+        if rel in overrides:
+            continue
+        p = _install_destination(target, rel)
+        data = p.read_bytes()
+        if hashlib.sha256(data).hexdigest() != meta["sha256"]:
+            raise ValueError(f"target changed before backup: {rel}")
+        artifacts[f"{base}/before/{rel}"] = data
+    for rel, data in artifacts.items():
+        p = _install_destination(target, rel)
+        if p.exists():
+            # Plan descriptions may differ on a repeated failed attempt; the receipt and
+            # before-images are immutable. The first retained plan remains authoritative.
+            if not rel.endswith("/plan.json") and p.read_bytes() != data:
+                raise ValueError(f"software recovery history changed: {rel}")
+        else:
+            _install_write_bytes(p, data)
+    return history_id
+
+
+def _install_json_bytes(value: dict) -> bytes:
+    return (json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode()
+
+
+def _install_start_transaction(target: Path, old_raw: bytes | None, receipt: dict,
+                               puts: dict, retire: list[str], operation: str) -> None:
+    """Durably stage all byte images before publishing an interrupted-work marker.
+
+    The marker is a software recovery intent, not a workspace/session authority. No
+    installed file changes until both the intent and its hash-addressed images are durable.
+    """
+    pending = _install_destination(target, _INSTALL_PENDING)
+    if pending.exists():
+        raise ValueError("unfinished software transaction; use --recover resume|rollback")
+    new_raw = _install_json_bytes(receipt)
+    blobs = {hashlib.sha256(new_raw).hexdigest(): new_raw}
+    if old_raw is not None:
+        blobs[hashlib.sha256(old_raw).hexdigest()] = old_raw
+    transitions = {}
+    for rel in sorted(set(puts) | set(retire)):
+        path = _install_destination(target, rel)
+        before = path.read_bytes() if path.exists() else None
+        before_meta = None
+        if before is not None:
+            before_sha = hashlib.sha256(before).hexdigest()
+            blobs[before_sha] = before
+            before_meta = {"sha256": before_sha, "mode": "0755" if path.stat().st_mode & 0o111 else "0644"}
+        after_meta = None
+        if rel in puts:
+            data, mode = puts[rel]
+            after_sha = hashlib.sha256(data).hexdigest()
+            blobs[after_sha] = data
+            after_meta = {"sha256": after_sha, "mode": mode}
+        user_owned = rel.startswith(_INSTALL_USER_PREFIXES) or rel in receipt.get("user_owned_files", [])
+        if user_owned and before is not None:
+            raise ValueError(f"software transaction cannot overwrite existing user state: {rel}")
+        transitions[rel] = {"before": before_meta, "after": after_meta, "user_owned": user_owned}
+    intent = {"schema_version": "1.0", "operation": operation,
+              "before_receipt": hashlib.sha256(old_raw).hexdigest() if old_raw is not None else None,
+              "after_receipt": hashlib.sha256(new_raw).hexdigest(), "files": transitions}
+    txid = hashlib.sha256(_install_json_bytes(intent)).hexdigest()
+    base = f"{_INSTALL_HISTORY}/transactions/{txid}"
+    for content_sha, content in blobs.items():
+        dest = _install_destination(target, f"{base}/blobs/{content_sha}")
+        if dest.exists() and dest.read_bytes() != content:
+            raise ValueError("software transaction blob collision")
+        if not dest.exists():
+            _install_write_bytes(dest, content)
+    envelope = {**intent, "transaction_sha256": txid}
+    _install_write_bytes(_install_destination(target, f"{base}/intent.json"), _install_json_bytes(envelope))
+    _install_write_bytes(pending, _install_json_bytes(envelope))
+
+
+def _install_recover(target: Path, direction: str, *, preview: bool = False) -> int:
+    pending = _install_destination(target, _INSTALL_PENDING)
+    if not pending.exists():
+        print(json.dumps({"status": "no_pending_transaction", "target": str(target)}))
+        return 0
+    raw_intent = pending.read_bytes()
+    envelope = json.loads(raw_intent)
+    txid = envelope.get("transaction_sha256")
+    intent = {k: v for k, v in envelope.items() if k != "transaction_sha256"}
+    if (not isinstance(txid, str) or hashlib.sha256(_install_json_bytes(intent)).hexdigest() != txid
+            or intent.get("schema_version") != "1.0" or not isinstance(intent.get("files"), dict)
+            or intent.get("operation") not in {"install", "upgrade", "rollback"}):
+        raise ValueError("pending software transaction hash/schema mismatch")
+    base = f"{_INSTALL_HISTORY}/transactions/{txid}"
+    if _install_destination(target, f"{base}/intent.json").read_bytes() != raw_intent:
+        raise ValueError("pending software intent differs from its retained evidence")
+
+    def blob(content_sha):
+        if not isinstance(content_sha, str) or not re.fullmatch("[a-f0-9]{64}", content_sha):
+            raise ValueError("invalid software transaction blob reference")
+        data = _install_destination(target, f"{base}/blobs/{content_sha}").read_bytes()
+        if hashlib.sha256(data).hexdigest() != content_sha:
+            raise ValueError("software transaction blob hash mismatch")
+        return data
+
+    after_raw = blob(intent["after_receipt"])
+    after = json.loads(after_raw)
+    _install_validate_receipt(after)
+    before_raw = blob(intent["before_receipt"]) if intent.get("before_receipt") else None
+    before = json.loads(before_raw) if before_raw is not None else None
+    if before:
+        _install_validate_receipt(before)
+        if before["state_schema"] != after["state_schema"]:
+            raise ValueError("software recovery state schema is incompatible")
+    preserved = set(after.get("user_owned_files", [])) | set(before.get("user_owned_files", []) if before else [])
+    rollback_raw = before_raw
+    if before:
+        restored = {p: m for p, m in before["managed_files"].items() if p not in preserved}
+        if restored != before["managed_files"]:
+            adjusted = {**before, "managed_files": restored, "user_owned_files": sorted(preserved),
+                        "declared_overrides": sorted(set(before.get("declared_overrides", [])) | set(after.get("declared_overrides", []))),
+                        "installed_artifact_sha256": _install_software_digest(restored)}
+            rollback_raw = _install_json_bytes(adjusted)
+    current_path = _install_destination(target, _INSTALL_RECEIPT)
+    current_raw = current_path.read_bytes() if current_path.exists() else None
+    if current_raw not in (before_raw, after_raw, rollback_raw):
+        raise ValueError("installed receipt changed outside the pending software transaction")
+    result_path = _install_destination(target, f"{base}/result.json")
+    if result_path.exists():
+        done = json.loads(result_path.read_bytes())
+        if done.get("direction") not in {"resume", "rollback"}:
+            raise ValueError("invalid software transaction completion record")
+        # A crash after the completion record but before marker cleanup must not turn a
+        # retry into an opposite-direction operation. A completed rollback uses --rollback.
+        direction = done["direction"]
+    desired_receipt = after_raw if direction == "resume" else rollback_raw
+    desired = "after" if direction == "resume" else "before"
+    conflicts, changes = [], []
+    checked = set()
+    for rel, transition in sorted(intent["files"].items()):
+        _install_rel(rel)
+        path = _install_destination(target, rel)
+        user_owned = rel.startswith(_INSTALL_USER_PREFIXES) or rel in preserved
+        if transition.get("user_owned") != user_owned:
+            raise ValueError(f"software transaction ownership mismatch: {rel}")
+        if user_owned and transition["before"] is not None:
+            raise ValueError(f"software recovery cannot overwrite user state: {rel}")
+        if user_owned and rel not in after.get("user_owned_files", []):
+            raise ValueError(f"software recovery seed lacks an ownership declaration: {rel}")
+        for meta in (transition["before"], transition["after"]):
+            if meta is not None:
+                if meta.get("mode") not in {"0644", "0755"}:
+                    raise ValueError("invalid recovery file mode")
+                blob(meta["sha256"])
+        if user_owned:
+            # Seeds become user-owned the moment created. Even an edited seed survives
+            # rollback, and resume never replaces it with an older staged copy.
+            if direction == "resume" and not path.exists() and transition["after"]:
+                changes.append((rel, transition["after"]))
+            continue
+        if not _install_profile(rel, {"core", "full", "aeap"}):
+            raise ValueError(f"software recovery path is outside managed profiles: {rel}")
+        if (transition["before"] != (before["managed_files"].get(rel) if before else None)
+                or transition["after"] != after["managed_files"].get(rel)):
+            raise ValueError(f"software transition differs from its pinned receipts: {rel}")
+        checked.add(rel)
+        observed = ({"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                     "mode": "0755" if path.stat().st_mode & 0o111 else "0644"} if path.exists() else None)
+        if observed not in (transition["before"], transition["after"]):
+            conflicts.append({"path": rel, "reason": "file is neither the recorded before nor after image"})
+        elif observed != transition[desired]:
+            changes.append((rel, transition[desired]))
+    # Verify unchanged managed files as well; otherwise unrelated local drift could be
+    # certified by the recovered software receipt.
+    all_managed = {**(before["managed_files"] if before else {}), **after["managed_files"]}
+    for rel, meta in all_managed.items():
+        if rel in checked or rel in preserved:
+            continue
+        path = _install_destination(target, rel)
+        if (not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != meta["sha256"]
+                or ("0755" if path.stat().st_mode & 0o111 else "0644") != meta["mode"]):
+            conflicts.append({"path": rel, "reason": "unchanged managed file drifted during transaction"})
+    plan = {"status": "conflict" if conflicts else "ready", "operation": "recover",
+            "direction": direction, "transaction_sha256": txid,
+            "changes": [{"path": p, "action": "restore" if meta else "archive"} for p, meta in changes],
+            "conflicts": conflicts, "preserved_user_files": sorted(preserved)}
+    if preview or conflicts:
+        print(json.dumps(plan, indent=2))
+        return 1 if conflicts else 0
+    for rel, meta in changes:
+        path = _install_destination(target, rel)
+        if meta is not None:
+            _install_write_bytes(path, blob(meta["sha256"]), meta["mode"])
+        elif path.exists():
+            archive_base = (f"{_INSTALL_HISTORY}/{intent['before_receipt']}/retired"
+                            if intent["operation"] == "rollback" and direction == "resume"
+                            else f"{base}/removed/{direction}")
+            archived = _install_destination(target, f"{archive_base}/{rel}")
+            archived.parent.mkdir(parents=True, exist_ok=True)
+            if archived.exists() and archived.read_bytes() != path.read_bytes():
+                raise ValueError("software recovery archive conflict")
+            os.replace(path, archived)
+            fsync_dir(path.parent)
+            fsync_dir(archived.parent)
+            parent = path.parent
+            while parent != target:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+    if desired_receipt is not None:
+        if not current_path.exists() or current_path.read_bytes() != desired_receipt:
+            _install_write_bytes(current_path, desired_receipt)
+    elif current_path.exists():
+        archived = _install_destination(target, f"{base}/removed/installation-receipt.json")
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(current_path, archived)
+        fsync_dir(target)
+    _install_write_bytes(result_path, _install_json_bytes({"transaction_sha256": txid, "direction": direction, "status": "complete"}))
+    pending.unlink()
+    fsync_dir(target)
+    print(json.dumps({**plan, "status": "ok", "wrote": len(changes)}))
+    return 0
+
+
+def _install_rollback(args: argparse.Namespace, target: Path, current: dict, raw_current: bytes) -> int:
+    _install_validate_receipt(current)
+    wanted = args.rollback
+    history_id = current.get("rollback_receipt") if wanted == "latest" else wanted
+    if not isinstance(history_id, str) or not re.fullmatch("[a-f0-9]{64}", history_id):
+        raise ValueError("rollback requires 'latest' or a retained 64-character receipt digest")
+    prior_path = _install_destination(target, f"{_INSTALL_HISTORY}/{history_id}/receipt.json")
+    raw_prior = prior_path.read_bytes()
+    if hashlib.sha256(raw_prior).hexdigest() != history_id:
+        raise ValueError("rollback receipt hash mismatch")
+    prior = json.loads(raw_prior)
+    _install_validate_receipt(prior)
+    if prior["state_schema"] != current["state_schema"]:
+        raise ValueError("rollback state schema is incompatible; explicit state migration required")
+    preserved = set(current.get("user_owned_files", [])) | set(prior.get("user_owned_files", []))
+    restored = {p: v for p, v in prior["managed_files"].items() if p not in preserved}
+    conflicts = _install_drift(target, current)
+    replacements = {}
+    changes = []
+    for rel, meta in restored.items():
+        backup = _install_destination(target, f"{_INSTALL_HISTORY}/{history_id}/before/{rel}")
+        if not backup.exists():
+            raise ValueError(f"rollback before-image missing: {rel}")
+        data = backup.read_bytes()
+        if hashlib.sha256(data).hexdigest() != meta["sha256"]:
+            raise ValueError(f"rollback before-image hash mismatch: {rel}")
+        dest = _install_destination(target, rel)
+        if rel not in current["managed_files"] and dest.exists():
+            conflicts.append({"path": rel, "reason": "rollback would overwrite an unowned file"})
+        old_meta = current["managed_files"].get(rel)
+        if old_meta != meta:
+            replacements[rel] = (data, meta["mode"])
+            changes.append({"path": rel, "action": "restore", "before_sha256": old_meta["sha256"] if old_meta else None,
+                            "after_sha256": meta["sha256"]})
+    retire = sorted(set(current["managed_files"]) - set(restored) - preserved)
+    changes.extend({"path": p, "action": "archive_added_software",
+                    "before_sha256": current["managed_files"][p]["sha256"]} for p in retire)
+    preview = {"status": "conflict" if conflicts else "ready", "operation": "rollback",
+               "target": str(target), "rollback_receipt": history_id,
+               "release_version": prior["release_version"], "changes": changes, "conflicts": conflicts,
+               "preserved_user_files": sorted(preserved)}
+    if conflicts or getattr(args, "dry_run", False):
+        print(json.dumps(preview, indent=2))
+        return 1 if conflicts else 0
+    receipt_path = _install_destination(target, _INSTALL_RECEIPT)
+    if receipt_path.read_bytes() != raw_current or _install_drift(target, current):
+        raise ValueError("installed code changed after rollback preflight")
+    reverse_id = hashlib.sha256(raw_current).hexdigest()
+    for rel in retire:
+        archived = _install_destination(target, f"{_INSTALL_HISTORY}/{reverse_id}/retired/{rel}")
+        if archived.exists():
+            raise ValueError(f"retired rollback path already exists: {rel}")
+    _install_save_history(target, raw_current, preview)
+    receipt = {**prior, "managed_files": restored, "user_owned_files": sorted(preserved),
+               "declared_overrides": sorted(set(current.get("declared_overrides", [])) | set(prior.get("declared_overrides", []))),
+               "installed_at": iso(), "rollback_receipt": reverse_id,
+               "previous_release_sha256": current["source_manifest_sha256"], "operation": "rollback",
+               "installed_artifact_sha256": _install_software_digest(restored)}
+    _install_start_transaction(target, raw_current, receipt, replacements, retire, "rollback")
+    if _install_recover(target, "resume") != 0:
+        return 1
+    print(json.dumps({**preview, "status": "ok", "wrote": len(changes), "receipt": _INSTALL_RECEIPT}))
+    return 0
+
+
+def _cmd_init_plan(args: argparse.Namespace) -> int:
+    """Install a checksummed release; upgrade only unchanged, previously managed code.
+
+    MemoryBank and research are user-owned from their first installation. The receipt pins
+    SOFTWARE only, never task/session authority. Preview makes no directories or lock files.
+    """
+    try:
+        if getattr(args, "force", False):
+            raise ValueError("--force cannot overwrite user state; use --upgrade --preview, resolve conflicts, then --upgrade")
+        raw_target = Path(args.target).expanduser().absolute()
+        if raw_target.is_symlink():
+            raise ValueError("target root is a symlink")
+        target = raw_target.resolve()
+        if target.exists() and not target.is_dir():
+            raise ValueError("installation target must be a directory")
+        if getattr(args, "recover", None):
+            if any(getattr(args, flag, False) for flag in ("rollback", "upgrade", "full", "with_aeap", "override")):
+                raise ValueError("recovery cannot be combined with install/profile/override options")
+            return _install_recover(target, args.recover, preview=bool(getattr(args, "dry_run", False)))
+        if _install_destination(target, _INSTALL_PENDING).exists():
+            raise ValueError("unfinished software transaction; use --recover resume|rollback")
+        receipt_path = _install_destination(target, _INSTALL_RECEIPT)
+        raw_old = receipt_path.read_bytes() if receipt_path.exists() else None
+        old = json.loads(raw_old) if raw_old is not None else None
+        if old:
+            _install_validate_receipt(old)
+        if getattr(args, "rollback", None):
+            if old is None:
+                raise ValueError("rollback requires an installed-software receipt")
+            if any(getattr(args, flag, False) for flag in ("upgrade", "full", "with_aeap", "override")):
+                raise ValueError("rollback cannot be combined with install/profile/override options")
+            return _install_rollback(args, target, old, raw_old)
+        src = _portable_template_root().resolve()
+        manifest, release_sha, source_files = _install_release(src)
+        if target == src or src in target.parents or target in src.parents:
+            raise ValueError("installation target must be separate from the release source")
+        state_schema = manifest.get("state_schema", "agentvault-v1")
+        if state_schema != "agentvault-v1" or (old and old["state_schema"] != state_schema):
+            raise ValueError("release state schema is incompatible; explicit migration required")
+        upgrade = bool(getattr(args, "upgrade", False))
+        if upgrade and old is None:
+            raise ValueError("--upgrade requires an existing AGENTVAULT_INSTALL.json ownership receipt")
+        profiles = set(old.get("profiles", [])) if old else set()
+        profiles.add("core")
+        if getattr(args, "full", False):
+            profiles.add("full")
+        if getattr(args, "with_aeap", False):
+            profiles.add("aeap")
+        if "aeap" in profiles and not any(p.startswith("aeap/engine/") for p in source_files):
+            raise ValueError("this release does not contain the requested AEAP extension")
+        selected = {p: dict(v) for p, v in source_files.items() if _install_profile(p, profiles)}
+        stamp = now().isoformat(timespec="seconds")
+        for rel, data in _install_seeds(stamp).items():
+            selected[rel] = {"data": data, "sha256": hashlib.sha256(data).hexdigest(), "mode": "0644"}
+        managed = dict(old["managed_files"]) if old else {}
+        preserved = set(old.get("user_owned_files", [])) if old else set()
+        overrides = set(old.get("declared_overrides", [])) if old else set()
+        for rel in getattr(args, "override", []) or []:
+            _install_rel(rel)
+            if rel not in selected and rel not in managed:
+                raise ValueError(f"override path is not part of this software profile: {rel}")
+            overrides.add(rel)
+            preserved.add(rel)
+            managed.pop(rel, None)
+        for p in managed:
+            _install_rel(p)
+            if p.startswith(_INSTALL_USER_PREFIXES):
+                raise ValueError(f"receipt incorrectly claims user-owned state as managed: {p}")
+        changes, conflicts, retained = [], _install_drift(target, old, overrides=overrides) if old else [], []
+        for rel, item in sorted(selected.items()):
+            dest = _install_destination(target, rel)
+            existing = dest.read_bytes() if dest.exists() else None
+            before = hashlib.sha256(existing).hexdigest() if existing is not None else None
+            user_owned = rel.startswith(_INSTALL_USER_PREFIXES) or rel in preserved
+            if existing is not None and (user_owned or rel not in managed):
+                preserved.add(rel)
+                if not rel.startswith(_INSTALL_USER_PREFIXES):
+                    overrides.add(rel)
+                retained.append(rel)
+                continue
+            previous = managed.get(rel)
+            if previous and before is not None and before != previous["sha256"]:
+                conflicts.append({"path": rel, "reason": "managed file changed locally", "installed_sha256": previous["sha256"], "observed_sha256": before, "incoming_sha256": item["sha256"]})
+                continue
+            if previous and (before != item["sha256"] or previous["mode"] != item["mode"]) and not upgrade:
+                conflicts.append({"path": rel, "reason": "release changed; explicit --upgrade required", "observed_sha256": before, "incoming_sha256": item["sha256"]})
+                continue
+            if before != item["sha256"] or (previous and previous["mode"] != item["mode"]):
+                changes.append({"path": rel, "action": "create" if existing is None else "replace",
+                                "before_sha256": before, "after_sha256": item["sha256"], "mode": item["mode"]})
+            if user_owned:
+                preserved.add(rel)
+            else:
+                managed[rel] = {"sha256": item["sha256"], "mode": item["mode"]}
+        preview = {"status": "conflict" if conflicts else "ready", "target": str(target),
+                   "release_version": manifest.get("version", "unversioned"), "profiles": sorted(profiles),
+                   "source_manifest_sha256": release_sha, "changes": changes, "conflicts": conflicts,
+                   "preserved_user_files": sorted(preserved),
+                   "retained_obsolete_managed_files": sorted(set(managed) - set(selected))}
+        if conflicts or getattr(args, "dry_run", False) or getattr(args, "preview", False):
+            print(json.dumps(preview, indent=2))
+            return 1 if conflicts else 0
+        installed_sha = _install_software_digest(managed)
+        if (old and not changes and old.get("source_manifest_sha256") == release_sha
+                and old.get("profiles") == sorted(profiles) and old.get("user_owned_files") == sorted(preserved)):
+            print(json.dumps({**preview, "status": "unchanged", "wrote": 0}))
+            return 0
+        # Complete preflight before the first write. Recheck every planned existing file;
+        # a caller must serialize install/upgrade with other writers in this target.
+        for change in changes:
+            dest = _install_destination(target, change["path"])
+            actual = hashlib.sha256(dest.read_bytes()).hexdigest() if dest.exists() else None
+            if actual != change["before_sha256"]:
+                raise ValueError(f"target changed after preview: {change['path']}")
+        receipt = {"schema_version": "1.0", "release_version": manifest.get("version", "unversioned"),
+                   "profiles": sorted(profiles), "source_manifest_sha256": release_sha,
+                   "installed_artifact_sha256": installed_sha, "state_schema": state_schema,
+                   "installed_at": stamp, "managed_files": managed, "user_owned_files": sorted(preserved),
+                   "declared_overrides": sorted(overrides),
+                   "rollback_receipt": hashlib.sha256(raw_old).hexdigest() if raw_old else None,
+                   "previous_release_sha256": old.get("source_manifest_sha256") if old else None}
+        target.mkdir(parents=True, exist_ok=True)
+        if receipt_path.exists() and receipt_path.read_bytes() != raw_old:
+            raise ValueError("installed-software receipt changed after preflight")
+        if old:
+            _install_save_history(target, raw_old, preview, overrides=overrides)
+        puts = {c["path"]: (selected[c["path"]]["data"], selected[c["path"]]["mode"]) for c in changes}
+        _install_start_transaction(target, raw_old, receipt, puts, [], "upgrade" if old else "install")
+        if _install_recover(target, "resume") != 0:
+            return 1
+        print(json.dumps({**preview, "status": "ok", "wrote": len(changes), "receipt": _INSTALL_RECEIPT}))
+        print("Next: cd", target, "&& bin/avcoord doctor && bin/avcoord status")
+        return 0
+    except (ValueError, OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        print(json.dumps({"status": "error", "error": str(error)}), file=sys.stderr)
+        return 1
 
 def cmd_init(args: argparse.Namespace) -> int:
-    """Copy portable template into --target. Idempotent unless --force."""
-    src = _portable_template_root()
-    if not src.is_dir():
-        print(
-            f"FAIL: portable template missing at {src}. "
-            "Clone agentvault and ensure templates/agentvault-portable/ exists.",
-            file=sys.stderr,
-        )
+    """Preview first, then serialize and recompute the plan under one installer lock."""
+    if getattr(args, "dry_run", False):
+        return _cmd_init_plan(args)
+    preview_args = argparse.Namespace(**vars(args))
+    preview_args.dry_run = True
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        rc = _cmd_init_plan(preview_args)
+    if rc:
+        print(stdout.getvalue(), end="")
+        print(stderr.getvalue(), end="", file=sys.stderr)
+        return rc
+    if '"status": "no_pending_transaction"' in stdout.getvalue():
+        print(stdout.getvalue(), end="")
+        return 0
+    try:
+        raw_target = Path(args.target).expanduser().absolute()
+        if raw_target.is_symlink():
+            raise ValueError("target root is a symlink")
+        target = raw_target.resolve()
+        target.mkdir(parents=True, exist_ok=True)
+        lock = _install_destination(target, ".agentvault-install.lock")
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "a+b") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                # Another installer may have completed after the read-only preview.
+                # Re-reading the receipt and every managed byte prevents mixed versions.
+                return _cmd_init_plan(args)
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    except (ValueError, OSError) as error:
+        print(json.dumps({"status": "error", "error": str(error)}), file=sys.stderr)
         return 1
-    target = Path(args.target).expanduser().resolve()
-    target.mkdir(parents=True, exist_ok=True)
-
-    # Always copy Core paths; --full also copies OpenViking/GraphRAG/VectorRAG
-    core_prefixes = (
-        "AGENTS.md",
-        "AGENTS.codex.md",
-        "ADOPT.md",
-        "GEMINI.md",
-        ".cursorrules",
-        ".windsurfrules",
-        ".cursor/",
-        ".githooks/",
-        ".github/",
-        "bin/",
-        "scripts/",
-        "MemoryBank/",
-        "EpisodicTracker/",
-    )
-    full_prefixes = core_prefixes + ("OpenViking/", "GraphRAG/", "VectorRAG/", "CLAUDE.md", "README.md", ".gitignore")
-    prefixes = full_prefixes if args.full else core_prefixes + ("CLAUDE.md", "README.md", ".gitignore")
-
-    wrote = skipped = 0
-    for path in sorted(src.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.name == ".DS_Store":
-            continue
-        rel = path.relative_to(src).as_posix()
-        if not any(rel == p.rstrip("/") or rel.startswith(p) for p in prefixes):
-            continue
-        # Core install without --full still needs empty GraphRAG/VectorRAG? Plan says Core without them.
-        action = _copy_file(path, target / rel, force=args.force)
-        if action == "wrote":
-            wrote += 1
-            print(f"  + {rel}")
-        else:
-            skipped += 1
-
-    # Ensure executable bits
-    for exe in (target / "bin" / "avcoord", target / "scripts" / "coord" / "avcoord.py", target / ".cursor" / "hooks" / "avcoord-lease-check.py", target / ".githooks" / "pre-commit"):
-        if exe.exists():
-            exe.chmod(exe.stat().st_mode | 0o111)
-
-    # Symlink CLAUDE.md → AGENTS.md if missing
-    claude = target / "CLAUDE.md"
-    if not claude.exists() or args.force:
-        try:
-            if claude.exists() or claude.is_symlink():
-                claude.unlink()
-            claude.symlink_to("AGENTS.md")
-            print("  + CLAUDE.md -> AGENTS.md")
-            wrote += 1
-        except OSError:
-            if not claude.exists():
-                claude.write_text("Follow AGENTS.md Boot exactly.\n", encoding="utf-8")
-                wrote += 1
-
-    print(json.dumps({"status": "ok", "target": str(target), "wrote": wrote, "skipped": skipped, "full": bool(args.full)}))
-    print("Next: cd", target, "&& bin/avcoord doctor && bin/avcoord status")
-    print("Optional: git config core.hooksPath .githooks")
-    return 0
 
 
 def cmd_rotate_events(args: argparse.Namespace) -> int:
@@ -2764,6 +4133,14 @@ def main(argv: list[str] | None = None) -> int:
         "gate": cmd_gate,
         "init": cmd_init,
         "rotate-events": cmd_rotate_events,
+        "hydrate": cmd_hydrate,
+        "intent": cmd_intent,
+        "task": cmd_task,
+        "workspace": cmd_workspace,
+        "query": cmd_query,
+        "done": cmd_done,
+        "compact": cmd_compact,
+        "fingerprint": cmd_fingerprint,
     }
     return dispatch[args.cmd](args)
 

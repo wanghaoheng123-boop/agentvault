@@ -14,7 +14,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,9 +55,20 @@ CONTESTED = {
     "bare_names": ["CURRENT.md", "next_ids.json", "AGENTS.md", "index.json"],
 }
 
-CURRENT_MD = """---
+TZ = timezone(timedelta(hours=8))
+
+
+def current_md(last_updated: str | None = None) -> str:
+    """CURRENT.md seed; the stamp defaults to recent so freshness is not a time bomb.
+
+    A hardcoded date passes until it ages past `stale_after_hours`, then every doctor test
+    starts failing on a clock tick rather than on a code change. Tests that want a stale or
+    pinned pointer pass `last_updated` explicitly.
+    """
+    stamp = last_updated or (datetime.now(TZ) - timedelta(hours=1)).isoformat(timespec="seconds")
+    return f"""---
 version: 1.0
-last_updated: 2026-09-06T21:00:00+08:00
+last_updated: {stamp}
 session_id: sess-test
 stale_after_hours: 48
 ---
@@ -82,7 +93,7 @@ def _scaffold(root: Path) -> None:
     (coord / "next_ids.json").write_text(json.dumps({"progress": 1, "episode": 1, "message": 1}))
     (coord / "threads.json").write_text(json.dumps({"schema_version": "1.0", "threads": []}))
     (coord / "audit.jsonl").touch()
-    (root / "MemoryBank" / "CURRENT.md").write_text(CURRENT_MD)
+    (root / "MemoryBank" / "CURRENT.md").write_text(current_md())
     (root / "AGENTS.md").write_text("# AGENTS\n")
     (root / "OpenViking").mkdir(exist_ok=True)
     (root / "OpenViking" / "L0_Core_Directives.md").write_text("# L0\n")
@@ -134,11 +145,39 @@ def start_run(av, role, runtime="pytest", task=""):
     with contextlib.redirect_stdout(buf):
         rc = av.cmd_run_start(ns(role=role, runtime=runtime, task=task, ttl_hours=1))
     assert rc == 0
-    return _json.loads(buf.getvalue())["run_id"]
+    record = _json.loads(buf.getvalue())
+    if not hasattr(av, "_test_tokens"):
+        av._test_tokens = {}
+    av._test_tokens[record["run_id"]] = record["run_token"]
+    return record["run_id"]
 
 
 def claim(av, agent, resource, ttl="15m", **kw):
+    if kw.get("run") in getattr(av, "_test_tokens", {}):
+        kw.setdefault("run_token", av._test_tokens[kw["run"]])
     return av.cmd_claim(
         ns(agent=agent, resource=[resource] if isinstance(resource, str) else resource,
            ttl=ttl, reason=kw.pop("reason", "test"), task_id=kw.pop("task_id", ""), **kw)
     )
+
+
+@pytest.fixture
+def writer_credentials(av, monkeypatch):
+    """Real modern credential and lease acquisition for authenticated writer tests."""
+    run = start_run(av, "orchestrator")
+    token = av._test_tokens[run]
+    monkeypatch.setenv("AVCOORD_RUN_ID", run)
+    monkeypatch.setenv("AVCOORD_RUN_TOKEN", token)
+    assert claim(av, "orchestrator", ["MemoryBank/**", "scripts/**"], run=run) == 0
+    proofs = av.read_leases()
+    monkeypatch.setenv("AVCOORD_LEASE_PROOFS_JSON", json.dumps(proofs))
+    return {"run_id": run, "run_token": token, "lease_proofs": proofs}
+
+
+def expected_head(cw, event_type="", body=None, task_id=""):
+    seq, digest, _ = cw.verify_chain()
+    expected = {"journal_seq": seq, "journal_hash": digest}
+    if event_type == "task.transition":
+        tid = (body or {}).get("task_id") or task_id
+        expected["task_revision"] = {tid: cw.fold(cw.read_prefix())["tasks"].get(tid, {}).get("revision", 0)}
+    return expected

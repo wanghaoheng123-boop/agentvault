@@ -26,6 +26,8 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
+from . import firewall
+
 TZ = timezone(timedelta(hours=8))
 POLICY_PATH = Path(__file__).resolve().parents[1] / "policies" / "sandbox.v1.yaml"
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
@@ -100,8 +102,9 @@ def execute(expression: str, features: dict[str, pd.Series], *, candidate_id: st
             policy_path: Path | None = None) -> tuple[pd.Series | None, dict]:
     """Execute a candidate. Returns (scores, run_manifest).
 
-    Refuses outright unless the firewall already passed: execution must never be the thing
-    that discovers a candidate is malformed.
+    The caller flag is only a prerequisite. The executor independently re-runs the typed
+    firewall and executes its lowered expression, so a forged ``True`` cannot bypass the
+    language boundary.
     """
     policy, policy_sha = load_policy(policy_path)
     started = datetime.now(TZ).isoformat(timespec="seconds")
@@ -135,19 +138,41 @@ def execute(expression: str, features: dict[str, pd.Series], *, candidate_id: st
         base_manifest["refusal_reason"] = "firewall did not pass; execution is not attempted"
         return None, base_manifest
 
+    declared_features = list(features) if isinstance(features, dict) else []
+    firewall_result = firewall.check(
+        expression, declared_features, candidate_id=candidate_id,
+    )
+    base_manifest["firewall_receipt_sha256"] = firewall.receipt_sha256(firewall_result)
+    base_manifest["firewall_policy_sha256"] = firewall_result.policy_sha256
+    base_manifest["operator_registry_sha256"] = firewall_result.operator_registry_sha256
+    if not firewall_result.ok:
+        base_manifest["refusal_reason"] = (
+            "executor firewall rejected expression: " + "; ".join(firewall_result.violations)
+        )
+        return None, base_manifest
+    try:
+        executable_expression = firewall.lower_expression(expression, declared_features)
+    except ValueError as error:
+        base_manifest["refusal_reason"] = str(error)
+        return None, base_manifest
+    base_manifest["executed_code_sha256"] = hashlib.sha256(
+        executable_expression.encode("utf-8")
+    ).hexdigest()
+
     lim = policy["limits"]
     with tempfile.TemporaryDirectory(prefix="aeap_sbx_") as tmp:
         tmp = Path(tmp)
         feat_p, out_p, expr_p = tmp / "features.pkl", tmp / "scores.pkl", tmp / "expr.txt"
         with feat_p.open("wb") as f:
             pickle.dump(features, f, protocol=4)
-        expr_p.write_text(expression)
+        expr_p.write_text(executable_expression)
 
         # Scrubbed environment: no inherited credentials, no proxy, no network helpers.
         env = {
             "PATH": "/usr/bin:/bin",
             "AEAP_ROOT": str(ENGINE_ROOT),
             "PYTHONHASHSEED": "0",
+            "PYTHONDONTWRITEBYTECODE": "1",
             "HOME": str(tmp),
             "TMPDIR": str(tmp),
             "no_proxy": "*",
@@ -160,7 +185,7 @@ def execute(expression: str, features: dict[str, pd.Series], *, candidate_id: st
         })
         try:
             proc = subprocess.run(
-                [sys.executable, "-I", "-c", _CHILD, limits_json, str(feat_p), str(out_p),
+                [sys.executable, "-I", "-B", "-c", _CHILD, limits_json, str(feat_p), str(out_p),
                  str(expr_p), libs],
                 capture_output=True, text=True, env=env, cwd=str(tmp),
                 timeout=float(lim["wall_seconds"]),

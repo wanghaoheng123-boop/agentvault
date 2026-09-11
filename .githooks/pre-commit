@@ -5,16 +5,22 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 CLI="$ROOT/scripts/coord/avcoord.py"
 AGENT="${AVCOORD_AGENT:-orchestrator}"
+RUN_ID="${AVCOORD_RUN_ID:-}"
 
-if [[ ! -f "$CLI" ]]; then
-  exit 0
+if [[ ! -f "$CLI" || -L "$CLI" ]]; then
+  echo "avcoord pre-commit: lease checker is missing or unsafe; commit denied" >&2
+  exit 1
 fi
 
 fail=0
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
   set +e
-  out="$(python3 "$CLI" check-lease --agent "$AGENT" --path "$f" 2>&1)"
+  args=(check-lease --agent "$AGENT" --path "$f")
+  if [[ -n "$RUN_ID" ]]; then
+    args+=(--run "$RUN_ID")
+  fi
+  out="$(python3 "$CLI" "${args[@]}" 2>&1)"
   rc=$?
   set -e
   if [[ "$rc" -ne 0 ]]; then

@@ -87,6 +87,15 @@ def _preflight(expression: str, pre: dict) -> str | None:
             if token.type in ignored:
                 continue
             count += 1
+            # F-strings contain executable ASTs inside one STRING token on Python 3.11;
+            # counting only external tokens would leave their parser depth unbounded.
+            if (token.type == tokenize.STRING
+                    and re.match(r"(?i)[rub]*f|f[rub]*", token.string)):
+                return "disallowed syntax: formatted strings exceed the closed parser grammar"
+            if tokenize.tok_name.get(token.type, "").startswith(("FSTRING", "TSTRING")):
+                return "disallowed syntax: interpolated strings are not factor expressions"
+            if token.type == tokenize.NAME and keyword.iskeyword(token.string):
+                return f"syntax error: disallowed syntax keyword {token.string!r}"
             if count > pre["max_tokens"] or 4 * count + 1 > pre["max_nodes"]:
                 return "pre-parse token/node budget exceeds max_nodes or max_tokens"
             if token.type == tokenize.NUMBER and len(token.string) > pre["max_numeric_literal_chars"]:
@@ -221,6 +230,8 @@ def check(expression: str, declared_features: list[str], *, candidate_id: str = 
                 else:
                     arg_types[widx] = "window"
                     minimum = operators.MIN_WINDOW[name]
+                    if name != "ts_lag":
+                        minimum = max(minimum, int(temporal["window_min"]))
                     maximum = min(int(temporal["window_max"]), operators.MAX_WINDOW)
                     if window < 0:
                         v.append(f"{name}: negative window {window} reads the future")

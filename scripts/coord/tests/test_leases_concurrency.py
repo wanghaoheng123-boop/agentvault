@@ -55,6 +55,32 @@ def test_two_runs_same_role_proceed_on_disjoint_resources(av):
     assert len(av.read_leases()) == 2
 
 
+def test_authorization_preserves_case_on_case_sensitive_paths(av):
+    """Claim exclusion may fold case, but a write capability must retain exact identity."""
+    upper = av.canon_resource("reports/A.md")
+    lower = av.canon_resource("reports/a.md")
+    assert av.resources_overlap(upper, lower), "claims remain conservatively exclusive"
+    assert not av.res_covers(upper, lower), "a lease must not widen across case-distinct paths"
+
+
+def test_symlink_retarget_invalidates_captured_lease(av):
+    first, second = av.ROOT / "reports" / "first", av.ROOT / "reports" / "second"
+    first.mkdir()
+    second.mkdir()
+    link = av.ROOT / "reports" / "current"
+    link.symlink_to(first, target_is_directory=True)
+    assert claim(av, "doc_writer", "reports/current/**", ttl="30m") == 0
+    lease = av.read_leases()[0]
+    assert any(av.res_covers(item, av.canon_resource("reports/first/result.md"))
+               for item in av.lease_resources(lease))
+
+    link.unlink()
+    link.symlink_to(second, target_is_directory=True)
+    assert av.lease_resources(lease) == []
+    assert not any(av.res_covers(item, av.canon_resource("reports/second/result.md"))
+                   for item in av.lease_resources(lease))
+
+
 def test_legacy_agent_reclaim_stays_idempotent(av):
     """No run identity means agent-level semantics, exactly as before."""
     assert claim(av, "orchestrator", "MemoryBank/CURRENT.md", ttl="10m") == 0
@@ -99,6 +125,101 @@ def test_run_cannot_release_another_runs_lease(av):
         ns(agent="orchestrator", resource=["MemoryBank/CURRENT.md"], all=False, run=b, token=None)
     )
     assert len(av.read_leases()) == 1
+
+
+# ------------------------------------------------------- release --all under a run (live bug)
+#
+# `--all` cannot carry a per-lease token: each lease has its own, so no single --token can
+# ever match more than one. Demanding one anyway skipped every lease and swept nothing,
+# leaving `release --resource X --token <that lease's token>`, one call per lease, as the
+# only working path. An authenticated run is credential enough for --all; a targeted
+# --resource release stays fail-closed and still requires --token.
+
+
+def _release(av, agent, run=None, **kw):
+    """cmd_release with the run secret attached — resolve_run() rejects a run without it.
+
+    Omitting run_token makes release fail authentication before it reads a single lease
+    file, so a test written without it passes on the error path and proves nothing about
+    principal, fence or token handling.
+    """
+    kw.setdefault("resource", None)
+    kw.setdefault("all", False)
+    kw.setdefault("token", None)
+    if run is not None:
+        kw["run_token"] = av._test_tokens[run]
+    return av.cmd_release(ns(agent=agent, run=run, **kw))
+
+
+def test_release_all_under_a_run_drops_every_lease_that_run_holds(av, capsys):
+    run = start_run(av, "orchestrator")
+    assert claim(av, "orchestrator", ["scripts/coord/**", "docs/**"], ttl="60m", run=run) == 0
+    assert len(av.read_leases()) == 2
+
+    assert _release(av, "orchestrator", run=run, all=True) == 0
+    assert av.read_leases() == []
+
+    # Sweeping an empty hand is distinguishable from having swept something, rather than
+    # printing the same "released 0" the broken token gate did.
+    capsys.readouterr()
+    assert _release(av, "orchestrator", run=run, all=True) == 1
+    assert "no lease is held" in capsys.readouterr().err
+
+
+def test_release_all_is_bound_to_the_calling_run(av):
+    """--all sweeps the caller's own leases, never a sibling run's."""
+    a, b = start_run(av, "orchestrator"), start_run(av, "orchestrator")
+    assert claim(av, "orchestrator", "scripts/coord/**", ttl="60m", run=a) == 0
+    assert claim(av, "orchestrator", "docs/**", ttl="60m", run=b) == 0
+
+    assert _release(av, "orchestrator", run=a, all=True) == 0
+    assert [l["resources"] for l in av.read_leases()] == [["docs/**"]]
+
+
+def test_release_all_with_a_stale_fence_releases_nothing_and_says_why(av, capsys):
+    """A lease from an older generation of this run is denied, not silently skipped.
+
+    No CLI path produces this state today — only `run start` writes a run record, and it
+    stamps `run_fence` == the run's fence at claim time — so the lease is aged on disk.
+    That is the state the branch exists for: `lease.get("run_fence", lease.get("fence", 0))`
+    falls back to the lease generation id precisely to judge leases written before the
+    current `run_fence` field, i.e. ones already on disk from an earlier generation.
+    """
+    run = start_run(av, "orchestrator")
+    assert claim(av, "orchestrator", "scripts/coord/**", ttl="60m", run=run) == 0
+    lease_file = next(av.LEASES.glob("*.json"))
+    stored = json.loads(lease_file.read_text())
+    stored["run_fence"] = int(stored["run_fence"]) - 1  # aged out by a later generation
+    lease_file.write_text(json.dumps(stored))
+    capsys.readouterr()
+
+    assert _release(av, "orchestrator", run=run, all=True) == 1
+    captured = capsys.readouterr()
+    assert "stale fence" in captured.err
+    assert "released nothing" in captured.err, "a matchless release must not read as a no-op"
+    assert len(av.read_leases()) == 1, "a stale fence must not release the lease"
+
+
+def test_targeted_release_with_a_wrong_token_still_refuses(av, capsys):
+    run = start_run(av, "orchestrator")
+    assert claim(av, "orchestrator", "scripts/coord/**", ttl="60m", run=run) == 0
+    capsys.readouterr()
+
+    rc = _release(av, "orchestrator", run=run, resource=["scripts/coord/**"], token="not-the-token")
+    assert rc == 1
+    assert "token mismatch" in capsys.readouterr().err
+    assert len(av.read_leases()) == 1
+
+
+def test_targeted_release_with_the_right_token_succeeds(av):
+    """Anchors the refusal above: the fail-closed path is still usable with a real token."""
+    run = start_run(av, "orchestrator")
+    assert claim(av, "orchestrator", "scripts/coord/**", ttl="60m", run=run) == 0
+    held = av.read_leases()[0]
+
+    rc = _release(av, "orchestrator", run=run, resource=["scripts/coord/**"], token=held["lease_token"])
+    assert rc == 0
+    assert av.read_leases() == []
 
 
 # ------------------------------------------------------------------------ T07 expiry / races
@@ -179,6 +300,62 @@ def test_concurrent_claims_leave_exactly_one_winner(av):
     codes = [p.wait() for p in procs]
     assert codes.count(0) == 1, f"expected exactly one winner, got {codes}"
     assert len(list(av.LEASES.glob("*.json"))) == 1
+
+
+def _barrier_process(av, barrier: Path, argv: list[str], *, env: dict) -> subprocess.Popen:
+    script = textwrap.dedent(
+        f"""
+        import importlib.util, json, sys, time
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location("av_race", {str(SRC / 'avcoord.py')!r})
+        m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+        deadline = time.monotonic() + 5
+        while not Path(sys.argv[1]).exists():
+            if time.monotonic() > deadline: raise SystemExit(99)
+            time.sleep(0.005)
+        raise SystemExit(m.main(json.loads(sys.argv[2])))
+        """
+    )
+    return subprocess.Popen([sys.executable, "-c", script, str(barrier), json.dumps(argv)],
+                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def test_synchronized_renew_release_race_cannot_resurrect_a_released_lease(av, tmp_path):
+    run = start_run(av, "orchestrator")
+    assert claim(av, "orchestrator", "MemoryBank/CURRENT.md", ttl="10m", run=run) == 0
+    lease = av.read_leases()[0]
+    barrier = tmp_path / "renew-release.go"
+    env = dict(os.environ, AVCOORD_ROOT=str(av.ROOT), AVCOORD_RUN_TOKEN=av._test_tokens[run])
+    renew = _barrier_process(av, barrier, ["renew", "--agent", "orchestrator", "--ttl", "30m",
+                                           "--run", run, "--token", lease["lease_token"]], env=env)
+    release = _barrier_process(av, barrier, ["release", "--agent", "orchestrator",
+                                             "--resource", "MemoryBank/CURRENT.md", "--run", run,
+                                             "--token", lease["lease_token"]], env=env)
+    barrier.touch()
+    codes = [renew.wait(timeout=10), release.wait(timeout=10)]
+    assert codes[1] == 0 and codes[0] in {0, 1}
+    assert av.read_leases() == []
+
+
+def test_synchronized_reap_reclaim_race_preserves_the_new_generation(av, clock, tmp_path):
+    old = start_run(av, "orchestrator")
+    assert claim(av, "orchestrator", "MemoryBank/CURRENT.md", ttl="10m", run=old) == 0
+    clock.advance(minutes=11)
+    new = start_run(av, "code_generator")
+    run_path = av.COORD / "runs" / f"{new}.json"
+    run_record = json.loads(run_path.read_text())
+    run_record["expires_at"] = "2099-01-01T00:00:00+00:00"
+    run_path.write_text(json.dumps(run_record))
+    barrier = tmp_path / "reap-reclaim.go"
+    env = dict(os.environ, AVCOORD_ROOT=str(av.ROOT), AVCOORD_RUN_TOKEN=av._test_tokens[new])
+    reclaim = _barrier_process(av, barrier, ["claim", "--agent", "code_generator",
+                                             "--resource", "MemoryBank/CURRENT.md", "--ttl", "10m",
+                                             "--run", new], env=env)
+    reap = _barrier_process(av, barrier, ["reap", "--agent", "orchestrator"], env=env)
+    barrier.touch()
+    assert [reclaim.wait(timeout=10), reap.wait(timeout=10)] == [0, 0]
+    live = av.read_leases()
+    assert len(live) == 1 and live[0]["run_id"] == new and live[0]["agent_id"] == "code_generator"
 
 
 def test_a_live_lock_is_never_stolen(av):

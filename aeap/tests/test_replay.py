@@ -21,16 +21,55 @@ def result(tmp_path_factory):
                              candidate_budget=4)
 
 
+@pytest.fixture(scope="module")
+def perturbed_result(tmp_path_factory):
+    """The same replay, rerun from an empty fixture with only FUTURE context added.
+
+    The corpus entry below becomes known after every decision date, so an implementation that
+    respects chronology must produce byte-identical earlier decisions. Reusing the first run's
+    fixture root would let state carry over and hide exactly the leak this is testing for.
+    """
+    root = tmp_path_factory.mktemp("replay-perturbed")
+    future_only = [{"id": "FUTURE-NOTE", "text": "context published after discovery ended",
+                    "known_at": "2022-06-30", "valid_from": "2022-06-30"}]
+    return replay.run_replay(decision_dates=["2021-06-30", "2021-12-31"],
+                             candidates=CANDS, fixture_root=root, n_dates=200,
+                             candidate_budget=4, corpus=future_only)
+
+
 def test_replay_cannot_promote_production_membership(result):
     assert result["is_production"] is False
     assert result["can_promote_production_membership"] is False
     assert result["production_admissions"] == 0
 
 
-def test_walk_forward_is_causal(result):
-    """A later admission must never become visible to an earlier decision date."""
-    c = replay.causality_check(result)
+def test_walk_forward_is_causal(result, perturbed_result):
+    """A later admission must never become visible to an earlier decision date.
+
+    Valid chronology is necessary but not sufficient, so the single-argument check reports
+    INCONCLUSIVE by design — a monotone ordering of dates proves nothing about what the
+    decisions actually consumed. Earning PASS requires an independent rerun in which only
+    future-known context changed and every earlier decision fingerprint stayed identical.
+    """
+    chronology = replay.causality_check(result)
+    assert chronology["status"] == "INCONCLUSIVE", chronology
+    assert "rerun required" in chronology["reason"]
+
+    c = replay.causality_check(result, perturbed_result)
     assert c["status"] == "PASS", c
+    assert c["compared_decisions"] == 2, "both discovery dates must actually be compared"
+
+
+def test_causality_fails_when_an_earlier_decision_moves(result, perturbed_result):
+    """Control: the comparison must be able to fail, not just report PASS.
+
+    Corrupting one earlier fingerprint in a copy of the perturbed run has to flip the verdict;
+    otherwise the test above would pass even if fingerprints were never compared.
+    """
+    import copy as _copy
+    tampered = _copy.deepcopy(perturbed_result)
+    tampered["per_date"][0]["decision_fingerprint"] = "0" * 64
+    assert replay.causality_check(result, tampered)["status"] == "FAIL"
 
 
 def test_budget_is_metered_and_exhausts(result):

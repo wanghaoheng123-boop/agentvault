@@ -144,6 +144,15 @@ emits the views and exits **2**. `generated_at` means a view was redrawn; `last_
 (stamped by `verify`) means someone actually checked. Thread status is never inferred from prose —
 the old unanchored ``COMPLETE`` regex is gone.
 
+## Managed Task Lifecycle
+
+New coordinated work uses the journal-backed v2 task contract in
+`MemoryBank/coord/specs/TASK_CONTRACT.md`. A task begins with `task.created` and follows
+`proposed → ready → claimed → in_progress → review → verified → integrated`. `verified`
+requires independent-review evidence; `integrated` requires a passing combined gate. Session
+notes and conversational completion never change this state. Historical pre-v2 transitions
+remain readable but do not receive v2 verification semantics.
+
 ## Anti Dual-SSOT
 
 If `workspace/SESSION_STATE.json` exists and is treated as co-equal with MemoryBank, `avcoord doctor` **FAIL**. AgentVault MemoryBank is the only project SSOT here. Platform wrappers must point here, not invent a second state machine.

@@ -8,7 +8,7 @@ INCONCLUSIVE — never a reported zero association."""
 from __future__ import annotations
 import numpy as np
 from ._common import (Check, PASS, FAIL, INCONCLUSIVE, need, per_date_ic, newey_west,
-                      date_gaps)
+                      date_gaps, HAC_CONVENTION)
 
 
 def run(ctx) -> Check:
@@ -18,7 +18,7 @@ def run(ctx) -> Check:
     min_assets = int(need(ctx.policy, "minimum_assets_per_date"))
     lags = max(0, int(ctx.horizon_days) - 1)
 
-    ic = per_date_ic(ctx.scores, ctx.returns, min_assets)
+    ic = per_date_ic(ctx.scores, ctx.returns, min_assets, scheduled_dates=ctx.scheduled_dates)
     ctx.artifacts["ic_series"] = ic
     valid = ic.dropna()
     gaps = date_gaps(ic, ctx.scheduled_dates)
@@ -29,9 +29,10 @@ def run(ctx) -> Check:
                      n_dates=int(len(valid)), threshold=min_dates,
                      detail={"missing_scheduled_dates": gaps})
 
-    mean, se, t, n = newey_west(valid, lags)
+    mean, se, t, n = newey_west(ic, lags, scheduled_dates=ctx.scheduled_dates)
     ctx.artifacts["mean_ic"] = mean
-    detail = {"hac_lags": lags, "missing_scheduled_dates": gaps,
+    detail = {"hac_lags": lags, "hac_convention": HAC_CONVENTION,
+              "mean_estimand": "observed_scheduled_dates", "missing_scheduled_dates": gaps,
               "min_abs_mean_ic": min_abs_ic, "min_abs_t_stat": min_abs_t,
               "multiplicity": ctx.policy["G4_rank_ic"].get("multiplicity"),
               "t_threshold_after_multiplicity": ctx.multiplicity_t_threshold}

@@ -1,5 +1,6 @@
 # Cursor overrides (Composer only)
 
 - Prefer multi-file edits over sequential single-file changes.
-- On OpenViking L0/L1 conflict, defer to OpenViking.
-- Always-on AgentVault boot lives in `.cursor/rules/agentvault.mdc` and `AGENTS.md` — do not duplicate a second boot list here.
+- Follow `AGENTS.md` §1 Workspace Entry Protocol; handoff per §3.
+- `.agentvault/` owns task routing and handoff; MemoryBank owns leases and the
+  journal. Never create `.agentvault/MemoryBank/`.

@@ -6,6 +6,12 @@ were written; they are regression guards, not hypotheticals.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from conftest import claim, ns
@@ -89,7 +95,11 @@ def test_canon_dereferences_symlink(av, tmp_path):
         ("reports/a", "reports/b", False),
         # alias spellings resolve to the same resource
         ("MemoryBank/CURRENT.md", ".//MemoryBank//CURRENT.md", True),
-        ("MemoryBank/CURRENT.md", "memorybank/current.md", True),
+        # CASE VARIANT — folded only for claim exclusion, never for authorization. A lease
+        # on `reports/A.md` must not authorize the distinct `reports/a.md` on a
+        # case-sensitive volume, so res_covers compares exact canonical spelling and
+        # conservatively denies the alias here. See res_covers in avcoord.py.
+        ("MemoryBank/CURRENT.md", "memorybank/current.md", False),
         # escapes are never authorized
         ("MemoryBank/CURRENT.md", "../../etc/passwd", False),
     ],
@@ -180,3 +190,66 @@ def test_traversal_escape_is_still_denied(av):
 def test_malformed_and_globbed_paths_are_denied(av):
     for bad in ("scripts/*/x.py", "", "   "):
         assert av.cmd_check_lease(ns(agent="orchestrator", path=bad, run=None)) == 1
+
+
+# ------------------------------------------------------------ adapter fail-closed boundary
+
+ROOT = Path(__file__).resolve().parents[3]
+CURSOR_HOOK = ROOT / ".cursor/hooks/avcoord-lease-check.py"
+PRE_COMMIT = ROOT / ".githooks/pre-commit"
+
+
+def run_cursor_hook(raw: str, workspace: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(CURSOR_HOOK)], input=raw, capture_output=True, text=True,
+        env={**os.environ, "AVCOORD_ROOT": str(workspace)}, timeout=15,
+    )
+
+
+def hook_permission(result: subprocess.CompletedProcess) -> str:
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)["permission"]
+
+
+def test_cursor_adapter_configuration_covers_mutation_channels_and_fails_closed():
+    config = json.loads((ROOT / ".cursor/hooks.json").read_text())
+    hook = config["hooks"]["preToolUse"][0]
+    assert hook["failClosed"] is True
+    for tool in ("Write", "Delete", "ApplyPatch", "Rename", "Shell"):
+        assert tool in hook["matcher"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "{not-json",
+        "",
+        "[]",
+        json.dumps({"tool_name": "Write", "tool_input": {}}),
+        json.dumps({"tool_name": "Shell", "tool_input": {"command": "cat x > protected"}}),
+    ],
+)
+def test_cursor_adapter_denies_unverifiable_mutations(av, raw):
+    assert hook_permission(run_cursor_hook(raw, av.ROOT)) == "deny"
+
+
+def test_cursor_adapter_denies_when_coordinator_is_missing(av):
+    (av.ROOT / "scripts/coord/avcoord.py").unlink()
+    raw = json.dumps({"tool_name": "Write", "tool_input": {"path": "MemoryBank/CURRENT.md"}})
+    assert hook_permission(run_cursor_hook(raw, av.ROOT)) == "deny"
+
+
+def test_cursor_adapter_still_allows_nonmutating_tools(av):
+    raw = json.dumps({"tool_name": "Read", "tool_input": {"path": "MemoryBank/CURRENT.md"}})
+    assert hook_permission(run_cursor_hook(raw, av.ROOT)) == "allow"
+
+
+def test_git_hook_denies_commit_when_coordinator_is_missing(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / "README.md").write_text("staged\n")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    result = subprocess.run(["bash", str(PRE_COMMIT)], cwd=repo, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "commit denied" in result.stderr
