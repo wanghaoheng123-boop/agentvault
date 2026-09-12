@@ -63,3 +63,10 @@ workspace. Two files need your project's specifics before they are useful:
 - `.agentvault/memory/lessons-learned.md` — starts nearly empty by design.
   Fill it as you learn; an entry is worth writing the moment it costs you
   twenty minutes.
+
+## 5. Shared worktree state
+
+Run `python3 -B .agentvault/bin/av-board.py hub` to find the canonical board,
+handoffs and lessons. Keep the tracked hub directory intact. Lifecycle hooks
+acquire canonical leases and finish tasks only after source-commit ancestry
+is verified. See `adrs/0002-canonical-hub-routing.md`.

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Atomic reader/writer for .agentvault/tasks/board.json.
 
-Exists because board.json is shared live across every worktree (it is reached
-through a symlink), which makes it a contested file. Hand-editing it from a
+Exists because board.json is shared live across every worktree (it is resolved
+through Git's common directory), which makes it a contested file. Hand-editing it from a
 shell hook would violate the invariants in
 .agentvault/invariants/concurrency-and-data.md:
 
@@ -24,15 +24,35 @@ unconditionally. Exit codes: 0 ok, 2 usage/not-found, 3 invalid status.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import fcntl
 import json
 import os
 import sys
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-BOARD = Path(__file__).resolve().parent.parent / "tasks" / "board.json"
+def hub_path() -> Path:
+    """Resolve shared state through Git without replacing tracked directories."""
+    local = Path(__file__).resolve().parent.parent
+    root = local.parent
+    # Standalone release installations without Git keep their local hub.
+    if not (root / ".git").exists():
+        return local
+    result = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=root, text=True, capture_output=True, check=True,
+    )
+    hub = Path(result.stdout.strip()).parent / ".agentvault"
+    if not hub.is_dir():
+        raise RuntimeError("canonical AgentVault hub is missing")
+    return hub
+
+
+HUB = hub_path()
+BOARD = HUB / "tasks" / "board.json"
 LOCK = BOARD.with_suffix(".json.lock")
 
 STATUSES = [
@@ -76,16 +96,19 @@ def save(data: dict) -> None:
         raise
 
 
-def mutate(fn):
+def mutate(fn, guard=None):
     """Run fn(data) under an exclusive lock, re-reading inside the lock (C7)."""
     LOCK.parent.mkdir(parents=True, exist_ok=True)
     with open(LOCK, "w") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
-            data = load()
-            rc = fn(data)
-            save(data)
-            return rc
+            # Acquire authorization after waiting for the board lock, and hold
+            # it through the final atomic save as well as the mutation callback.
+            with guard if guard is not None else nullcontext():
+                data = load()
+                rc = fn(data)
+                save(data)
+                return rc
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
 
@@ -142,6 +165,7 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser("hub", help="print the canonical shared hub path")
     g = sub.add_parser("get", help="print the board, or one task")
     g.add_argument("--id")
 
@@ -157,6 +181,10 @@ def main() -> int:
             s.add_argument("--status")
 
     a = p.parse_args()
+
+    if a.cmd == "hub":
+        print(HUB)
+        return 0
 
     if a.cmd == "get":
         data = load()

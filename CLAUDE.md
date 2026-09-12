@@ -133,33 +133,49 @@ Two that catch people immediately:
 
 ## 6. Worktree commands
 
-With Worktrunk (`wt`) installed, `.config/wt.toml` drives the lifecycle. The
-raw `git` forms below work without it.
+Install Worktrunk and its shell integration before using `wt`. These hooks
+use the 0.76 configuration schema; validate your installed version. Project hooks live at top-level keys in
+`.config/wt.toml`; the default worktree path is a sibling of the main checkout.
 
-**Start a new task**
 ```bash
-wt switch -c feat-x -x claude -- "<task prompt>"
-```
-```bash
-git worktree add -b feat-x ../project.feat-x main
-cd ../project.feat-x
-# sed, not awk: a repository path may contain spaces
-ln -sfn "$(git worktree list --porcelain | sed -n '1s/^worktree //p')/.agentvault" .agentvault
-.agentvault/bin/av-board.py claim --id feat-x --branch feat-x --agent Agent-Alpha
-```
+# Start a task; pre-start registers it on the shared board under a lease.
+wt switch -c codex/my-task -x claude -- "<task prompt>"
 
-**Resume an abandoned task** — git refuses to check out one branch in two
-worktrees, which guarantees one agent per branch. Enter the *existing* worktree:
-```bash
-wt switch feat-x -x claude -- "Resume from .agentvault/handoffs/feat-x.md"
-```
-```bash
-cd ../project.feat-x
+# Without Worktrunk:
+git worktree add -b codex/my-task ../workspace.codex-my-task main
+cd ../workspace.codex-my-task
+python3 -B .agentvault/bin/av-lifecycle.py start
+
+# Locate LIVE board, handoffs, invariants and lessons from any worktree:
+HUB_PATH=$(python3 -B .agentvault/bin/av-board.py hub)
+cat "$HUB_PATH/INDEX.md"
 ```
 
-**Merge** — `wt merge main` runs the `pre-merge` hook (tests, static analysis,
-adversarial invariant audit, lessons harvest, board → `MERGED`, handoff
-archived). Without `wt`, run those steps by hand; see `.config/wt.toml`.
+Do not replace a tracked `.agentvault/` directory with a symlink. The board CLI
+resolves the canonical hub via Git's common directory; tracked code stays
+isolated. Write handoffs and shared notes under `$HUB_PATH`, then checkpoint
+those changes in the main checkout. Read ADR-0002 before changing this routing.
+The avcoord lease CLI still operates on its invocation's repository root; use
+`bin/avcoord` in the canonical main checkout for global coordination leases.
+
+Resume an existing task with `wt switch <branch>` (or enter its existing path),
+read the canonical handoff, run its reproducer, and then claim it. The start
+hook refuses to take over a task actively assigned to another agent.
+
+Before merge, commit the verified code and fill the canonical handoff. Run:
+
+```bash
+wt merge main --no-squash --no-rebase --no-remove
+```
+
+The pre-merge hook runs tests, compileall and an independent invariant audit.
+Only post-merge closes the task: it verifies source-commit ancestry in target
+HEAD, archives the handoff and records merge provenance under a shared lock
+and lease. Review and checkpoint any resulting canonical hub changes in the
+main checkout. The provenance entry is not a substitute for writing useful
+lessons. Do not report a task MERGED merely because pre-merge passed.
+
+---
 
 ## 7. Coordination engine: `avcoord` / MemoryBank
 

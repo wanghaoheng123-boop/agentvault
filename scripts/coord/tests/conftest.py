@@ -106,6 +106,24 @@ def _scaffold(root: Path) -> None:
     (root / "EpisodicTracker" / "events.jsonl").touch()
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_coordinator_env(monkeypatch):
+    """Scrub the caller's AVCOORD_* before every test.
+
+    Any agent doing real work exports AVCOORD_AGENT / AVCOORD_RUN_ID /
+    AVCOORD_RUN_TOKEN in order to commit, and `bin/avcoord gate` is run BY
+    those agents. Inherited, they bind child processes to the real run and the
+    real lease store instead of the per-test sandbox: 15 tests across
+    test_leases_concurrency, test_freshness_and_mail and test_path_authorization
+    failed in exactly that situation and passed in a clean shell, so the gate
+    was unreliable for the only people who run it. Fixtures that need these
+    values (writer_credentials) set them explicitly afterwards.
+    """
+    for key in ("AVCOORD_AGENT", "AVCOORD_RUN_ID", "AVCOORD_RUN_TOKEN",
+                "AVCOORD_LEASE_PROOFS_JSON"):
+        monkeypatch.delenv(key, raising=False)
+
+
 @pytest.fixture
 def av(tmp_path, monkeypatch):
     root = tmp_path / "ws"

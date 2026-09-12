@@ -74,7 +74,7 @@ it is the physical guarantee behind "one agent per branch".
 
 - Do not defeat it with `--force`, detached HEAD, or a second clone.
 - To take over an abandoned branch, use its **existing** worktree.
-- `.agentvault/` is shared across worktrees by symlink, so `board.json` is a
+- Canonical `.agentvault/` state is shared through Git common-directory resolution, so `board.json` is a
   contested file: re-read before writing if you have been idle.
 
 ## C9 — Idempotency
@@ -92,3 +92,7 @@ Prefer allocating ids via `bin/avcoord next-id` over inventing them, and prefer
 3. Am I writing atomically, or appending one whole line?
 4. Did I re-read the file after my last idle period?
 5. Is this operation safe if it runs twice?
+
+Resolve the live hub with `python3 -B .agentvault/bin/av-board.py hub` and use
+that path for handoffs and notes. Never replace tracked hub directories with
+symlinks. Commit shared state from the primary checkout. See ADR-0002.

@@ -3,6 +3,9 @@
 - **Status:** Accepted
 - **Deciders:** repository owner
 
+This original routing decision is amended by ADR-0002: resolve canonical state
+through Git instead of symlinking over tracked directories.
+
 ## Context
 
 This workspace is worked by multiple autonomous coding agents, often across
