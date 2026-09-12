@@ -1159,11 +1159,6 @@ def contested_config() -> tuple[tuple[str, ...], tuple[str, ...]]:
 CONTESTED_PREFIXES = DEFAULT_CONTESTED_PREFIXES
 
 
-def registry_agent_ids() -> set[str]:
-    data = load_json(REGISTRY, {}) or {}
-    ids = {a.get("id") for a in data.get("agents", []) if a.get("id")}
-    return ids or set(KNOWN_AGENTS_FALLBACK)
-
 
 def registry_agent(agent_id: str) -> dict | None:
     data = load_json(REGISTRY, {}) or {}
@@ -1213,10 +1208,6 @@ def check_write_scopes(agent_id: str, resources: list[Any], *, strict: bool = Fa
             print(f"{'FAIL' if strict else 'WARN'}: resource '{label}' outside write_scopes for {agent_id}", file=sys.stderr)
     return ok_all or not strict
 
-
-def warn_write_scopes(agent_id: str, resources: list[str]) -> None:
-    """Back-compat alias."""
-    check_write_scopes(agent_id, list(resources))
 
 
 def read_protocol() -> dict:
