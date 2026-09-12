@@ -282,7 +282,11 @@ def lease_expired(lease: dict) -> bool:
     return now() >= exp
 
 
-def read_leases(*, reap: bool = False) -> list[dict]:
+class LeaseStoreUnreadable(RuntimeError):
+    """A lease file could not be parsed. Treated as blocking, never as absent."""
+
+
+def read_leases(*, reap: bool = False, strict: bool = False) -> list[dict]:
     """Return live leases. A pure read unless reap=True.
 
     reap=True unlinks expired leases and must only be called with the lease lock held.
@@ -299,8 +303,19 @@ def read_leases(*, reap: bool = False) -> list[dict]:
         try:
             lease = load_json(p)
         except Exception as e:
-            if reap:
-                audit("lease_read_error", path=str(p), error=str(e))
+            # Always audit. Previously this recorded only when reap=True, which
+            # is never true on the read path (check-lease, doctor, status, and
+            # cmd_claim's overlap scan) — so corruption was silent.
+            audit("lease_read_error", path=str(p), error=str(e))
+            if strict:
+                # Fail CLOSED. An unreadable lease may be a live holder; skipping
+                # it removes that holder from the exclusion set and grants an
+                # overlapping lease. Mutual exclusion is the one property the
+                # system rests on, so an unknown lease blocks rather than vanishes.
+                raise LeaseStoreUnreadable(
+                    f"unreadable lease file {p.name}: {e}. Inspect or reap it "
+                    f"before claiming; it may cover a resource you are taking."
+                ) from e
             continue
         if not lease:
             continue
@@ -648,7 +663,9 @@ def cmd_claim(args: argparse.Namespace) -> int:
     LEASES.mkdir(parents=True, exist_ok=True)
     try:
         with coord_lock():
-            live = read_leases(reap=True)
+            # strict: an unreadable lease blocks the claim instead of vanishing
+            # from the exclusion set and letting an overlapping lease through.
+            live = read_leases(reap=True, strict=True)
             for raw, c in wanted:
                 for other in live:
                     if _same_principal(other, args.agent, run_id):
@@ -3383,7 +3400,12 @@ def cmd_check_lease(args: argparse.Namespace) -> int:
     for L in read_leases():
         if not _same_principal(L, args.agent, run_id):
             continue
-        for ores in L.get("resources") or []:
+        # lease_resources(), not the raw list: it re-canonicalises each requested
+        # resource and returns [] when the captured key no longer matches, which
+        # is how retargeting a symlink revokes a lease. commit_worker.authorize
+        # already did this; check-lease did not — so that revocation was
+        # unenforced on the two surfaces agents hit, the hook and pre-commit.
+        for ores in lease_resources(L):
             # DIRECTIONAL: the lease must cover the target. It never authorizes the
             # target's ancestor, nor a sibling that merely shares a string prefix.
             if lease_authorizes(ores, target):

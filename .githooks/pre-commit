@@ -7,6 +7,23 @@ CLI="$ROOT/scripts/coord/avcoord.py"
 AGENT="${AVCOORD_AGENT:-orchestrator}"
 RUN_ID="${AVCOORD_RUN_ID:-}"
 
+# Pin the lease store. configure_paths() re-reads AVCOORD_ROOT from the
+# environment on every invocation, so without this an inherited
+# `export AVCOORD_ROOT=/tmp/x` plus a hand-written lease file makes
+# check-lease answer from a store the committer controls — the gate returns
+# ok:true for any contested path. Verified exploitable before this line existed.
+#
+# Pinned to the MAIN worktree, not `git rev-parse --show-toplevel`: leases live
+# in MemoryBank/coord/leases/ which is gitignored, so a linked worktree has an
+# empty store and every contested commit from a worktree would fail. sed, not
+# awk — this repository's path contains spaces.
+MAIN_REPO="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
+if [[ -z "$MAIN_REPO" || ! -d "$MAIN_REPO" ]]; then
+  echo "avcoord pre-commit: cannot resolve the main worktree; commit denied" >&2
+  exit 1
+fi
+export AVCOORD_ROOT="$MAIN_REPO"
+
 if [[ ! -f "$CLI" || -L "$CLI" ]]; then
   echo "avcoord pre-commit: lease checker is missing or unsafe; commit denied" >&2
   exit 1

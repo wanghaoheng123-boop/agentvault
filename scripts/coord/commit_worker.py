@@ -871,7 +871,18 @@ def rebuild_projections(*, write_current: bool = False) -> dict:
             current_hash = hashlib.sha256(av.CURRENT.read_bytes()).hexdigest()
         elif av.CURRENT.is_file() and not av.CURRENT.is_symlink():
             secure_path(av.CURRENT)
-            current_hash = hashlib.sha256(av.CURRENT.read_bytes()).hexdigest()
+            # Carry the PREVIOUS recorded hash forward; do NOT re-hash what is on
+            # disk. Re-hashing launders tampering: edit CURRENT.md's body, and the
+            # next non-workspace journal commit (task.created, intent.recorded,
+            # artifact.registered — all of which rebuild with write_current=False)
+            # would adopt the tampered bytes as the new expected value. doctor
+            # reported JOURNAL_CURRENT_TAMPERED once, then PASS forever after.
+            # Only a real re-projection (write_current=True) may set a new hash.
+            prior = av.load_json(projections_dir() / "_meta.json", {}) or {}
+            current_hash = prior.get("current_sha256")
+            if current_hash is None:
+                # No prior record to preserve (first build): adopt what is there.
+                current_hash = hashlib.sha256(av.CURRENT.read_bytes()).hexdigest()
         meta = {**common, "event_count": len(events), "authority": read_protocol().get("authority", "legacy"),
                 "committed_authority": state["authority"],
                 "projection_hashes": hashes, "current_sha256": current_hash,
