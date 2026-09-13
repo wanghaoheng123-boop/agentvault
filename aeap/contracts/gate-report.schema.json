@@ -1,0 +1,727 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aeap/contracts/gate-report.schema.json",
+  "title": "Nine-gate evaluation report (B4 output)",
+  "description": "Only nine PASS results, a PASS firewall/isolation receipt and a matching peer ACK can reach admission. Undefined, missing, zero-sign and insufficient-sample cases never silently pass.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "campaign_id",
+    "evaluated_at",
+    "code_sha256",
+    "proposal_sha256",
+    "data_sha256",
+    "label_sha256",
+    "policy_sha256",
+    "reference_sha256",
+    "author_run_id",
+    "executor_run_id",
+    "judge_run_id",
+    "development_period",
+    "decision_date",
+    "expected_sign",
+    "checks",
+    "admissible",
+    "blocking_reasons"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "candidate_id": {
+      "type": "string"
+    },
+    "campaign_id": {
+      "type": "string"
+    },
+    "evaluated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "code_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "proposal_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "data_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "label_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "policy_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "reference_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "author_run_id": {
+      "type": "string"
+    },
+    "executor_run_id": {
+      "type": "string"
+    },
+    "judge_run_id": {
+      "type": "string"
+    },
+    "development_period": {
+      "type": "object",
+      "required": [
+        "start",
+        "end"
+      ],
+      "properties": {
+        "start": {
+          "type": "string"
+        },
+        "end": {
+          "type": "string"
+        }
+      }
+    },
+    "decision_date": {
+      "type": "string"
+    },
+    "expected_sign": {
+      "enum": [
+        1,
+        -1
+      ]
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "G1_duplicate",
+        "G2_self_collapse",
+        "G3_coverage",
+        "G4_rank_ic",
+        "G5_regime_sign",
+        "G6_novelty",
+        "G7_partial_ic",
+        "G8_fama_macbeth",
+        "G9_sign_alignment"
+      ],
+      "properties": {
+        "G1_duplicate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "INCONCLUSIVE",
+                "NOT_RUN"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "estimate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "uncertainty": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "type": [
+                "number",
+                "string",
+                "null"
+              ]
+            },
+            "n_dates": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "n_obs": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "units": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        },
+        "G2_self_collapse": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "INCONCLUSIVE",
+                "NOT_RUN"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "estimate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "uncertainty": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "type": [
+                "number",
+                "string",
+                "null"
+              ]
+            },
+            "n_dates": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "n_obs": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "units": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        },
+        "G3_coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "INCONCLUSIVE",
+                "NOT_RUN"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "estimate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "uncertainty": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "type": [
+                "number",
+                "string",
+                "null"
+              ]
+            },
+            "n_dates": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "n_obs": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "units": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        },
+        "G4_rank_ic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "INCONCLUSIVE",
+                "NOT_RUN"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "estimate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "uncertainty": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "type": [
+                "number",
+                "string",
+                "null"
+              ]
+            },
+            "n_dates": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "n_obs": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "units": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        },
+        "G5_regime_sign": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "INCONCLUSIVE",
+                "NOT_RUN"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "estimate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "uncertainty": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "type": [
+                "number",
+                "string",
+                "null"
+              ]
+            },
+            "n_dates": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "n_obs": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "units": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        },
+        "G6_novelty": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "INCONCLUSIVE",
+                "NOT_RUN"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "estimate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "uncertainty": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "type": [
+                "number",
+                "string",
+                "null"
+              ]
+            },
+            "n_dates": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "n_obs": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "units": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        },
+        "G7_partial_ic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "INCONCLUSIVE",
+                "NOT_RUN"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "estimate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "uncertainty": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "type": [
+                "number",
+                "string",
+                "null"
+              ]
+            },
+            "n_dates": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "n_obs": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "units": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        },
+        "G8_fama_macbeth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "INCONCLUSIVE",
+                "NOT_RUN"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "estimate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "uncertainty": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "type": [
+                "number",
+                "string",
+                "null"
+              ]
+            },
+            "n_dates": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "n_obs": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "units": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        },
+        "G9_sign_alignment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "INCONCLUSIVE",
+                "NOT_RUN"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "estimate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "uncertainty": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "threshold": {
+              "type": [
+                "number",
+                "string",
+                "null"
+              ]
+            },
+            "n_dates": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "n_obs": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "units": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "firewall_receipt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "isolation_receipt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "admissible": {
+      "type": "boolean"
+    },
+    "blocking_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "data_status": {
+      "type": "string"
+    },
+    "model_vintage_status": {
+      "type": "string"
+    }
+  }
+}

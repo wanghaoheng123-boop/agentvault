@@ -1,0 +1,63 @@
+# AST firewall policy v1 — RFC §6. Owner: security_auditor. A formalizer cannot whitelist
+# its own rejected operation. Static validation completes BEFORE any data handle is supplied.
+schema_version: "1.0"
+policy_id: firewall.v1
+status: ACTIVE
+
+# Conservative lexical budgets apply BEFORE parsing; iterative AST validation repeats
+# exact node/depth checks. Policies may tighten but cannot raise parser hard ceilings.
+pre_parse:
+  max_source_bytes: 2000
+  max_nodes: 400
+  max_depth: 20
+  max_tokens: 128
+  max_numeric_literal_chars: 32
+
+# Runtime signatures are closed in operators.result_type; policy cannot add an overload.
+typed_contract: series_scalar_checked_arithmetic_v2
+operator_version_binding: implementation_source_and_registry_and_dependency_versions
+feature_namespace: ascii_identifiers_disjoint_from_operators_and_runtime_names
+
+allowed_operators:
+  cs_rank:   {arity: 1, scope: cross_section_per_date, description: "rank within a date across eligible assets"}
+  cs_demean: {arity: 1, scope: cross_section_per_date}
+  cs_zscore: {arity: 1, scope: cross_section_per_date}
+  ts_lag:    {arity: 2, scope: per_asset_ordered_by_date, window_arg: 1, trailing_only: true}
+  ts_mean:   {arity: 2, scope: per_asset_ordered_by_date, window_arg: 1, trailing_only: true}
+  ts_std:    {arity: 2, scope: per_asset_ordered_by_date, window_arg: 1, trailing_only: true}
+  ts_delta:  {arity: 2, scope: per_asset_ordered_by_date, window_arg: 1, trailing_only: true}
+  add:       {arity: 2}
+  sub:       {arity: 2}
+  mul:       {arity: 2}
+  div:       {arity: 2, zero_denominator: nan}   # checked division, never inf
+  neg:       {arity: 1}
+  log1p:     {arity: 1, domain_guard: true}
+
+temporal_rules:
+  window_must_be_constant_int: true
+  window_min: 1
+  window_max: 250
+  negative_shift: REJECT          # a negative lag reads the future
+  centered_window: REJECT
+  backward_fill: REJECT
+  future_join: REJECT
+  full_history_fit: REJECT
+
+rejected_by_default:
+  - import
+  - dynamic_attribute_access
+  - subscript
+  - eval
+  - exec
+  - getattr
+  - dunder_access
+  - lambda_or_callback
+  - assignment
+  - comprehension
+  - undeclared_feature
+  - unknown_receiver
+  - unbounded_allocation
+  - string_literal            # no column names smuggled as strings
+
+recheck_before_execution: true    # code/grammar/operator version hashes verified again
+label_columns_never_resolvable: true

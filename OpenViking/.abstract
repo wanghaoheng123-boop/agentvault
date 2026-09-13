@@ -1,0 +1,12 @@
+# OpenViking Layer Index (.abstract)
+# Read this FIRST to understand what's in each file without loading full content.
+# Last updated: 2026-09-05 (expertise layer)
+
+| File | Version | Priority | Summary |
+|------|---------|----------|---------|
+| L0_Core_Directives.md | 2.1 | P0 | Identity + P0/P1/P2 severity contract; uncertainty/completeness scoped; meta-eval on epics. |
+| L1_System_Architecture.md | 3.0 | P0 | Five memory layers plus CURRENT/board/coord/sessions, agent detection wrappers, avcoord runtime. |
+| L2_Operational_Rules.md | 3.1 | P1 | ETS, maildir, leases + PreToolUse/git enforcement, events.jsonl preference, anti dual-SSOT, hygiene. |
+| L2_Expertise_Activation.md | 1.0 | P1 | Depth research gate, specialist playbooks, epistemic labels, anti-hallucination; load on P2 only. |
+
+Coordination contract (MemoryBank, not OpenViking): `MemoryBank/coord/PROTOCOL.md`.

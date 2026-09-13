@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# AgentVault: block commits that touch contested paths without a live lease.
+# Enable once: git config core.hooksPath .githooks
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+CLI="$ROOT/scripts/coord/avcoord.py"
+AGENT="${AVCOORD_AGENT:-orchestrator}"
+RUN_ID="${AVCOORD_RUN_ID:-}"
+
+# Pin the lease store. configure_paths() re-reads AVCOORD_ROOT from the
+# environment on every invocation, so without this an inherited
+# `export AVCOORD_ROOT=/tmp/x` plus a hand-written lease file makes
+# check-lease answer from a store the committer controls — the gate returns
+# ok:true for any contested path. Verified exploitable before this line existed.
+#
+# Pinned to the MAIN worktree, not `git rev-parse --show-toplevel`: leases live
+# in MemoryBank/coord/leases/ which is gitignored, so a linked worktree has an
+# empty store and every contested commit from a worktree would fail. sed, not
+# awk — this repository's path contains spaces.
+MAIN_REPO="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
+if [[ -z "$MAIN_REPO" || ! -d "$MAIN_REPO" ]]; then
+  echo "avcoord pre-commit: cannot resolve the main worktree; commit denied" >&2
+  exit 1
+fi
+export AVCOORD_ROOT="$MAIN_REPO"
+
+if [[ ! -f "$CLI" || -L "$CLI" ]]; then
+  echo "avcoord pre-commit: lease checker is missing or unsafe; commit denied" >&2
+  exit 1
+fi
+
+fail=0
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  set +e
+  args=(check-lease --agent "$AGENT" --path "$f")
+  if [[ -n "$RUN_ID" ]]; then
+    args+=(--run "$RUN_ID")
+  fi
+  out="$(python3 "$CLI" "${args[@]}" 2>&1)"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    echo "avcoord pre-commit: contested path lacks live lease for $AGENT: $f" >&2
+    echo "  $out" >&2
+    echo "  Fix: bin/avcoord claim --agent $AGENT --resource $f" >&2
+    fail=1
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACMRD)
+
+exit "$fail"

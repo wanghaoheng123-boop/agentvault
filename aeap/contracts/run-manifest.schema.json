@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aeap/contracts/run-manifest.schema.json",
+  "title": "Sandbox execution manifest (B3 output)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "executor_run_id",
+    "started_at",
+    "finished_at",
+    "code_sha256",
+    "feature_snapshot_sha256",
+    "output_sha256",
+    "isolation",
+    "row_count",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "candidate_id": {
+      "type": "string"
+    },
+    "executor_run_id": {
+      "type": "string"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "code_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "feature_snapshot_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "output_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "row_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "status": {
+      "enum": [
+        "ok",
+        "failed",
+        "timeout",
+        "resource_exceeded",
+        "refused"
+      ]
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "network",
+        "labels_visible",
+        "writable_paths",
+        "cpu_seconds",
+        "memory_bytes",
+        "enforced_by"
+      ],
+      "properties": {
+        "network": {
+          "const": false
+        },
+        "labels_visible": {
+          "const": false
+        },
+        "writable_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cpu_seconds": {
+          "type": "number"
+        },
+        "memory_bytes": {
+          "type": "integer"
+        },
+        "enforced_by": {
+          "type": "string",
+          "description": "Mechanism actually used. 'subprocess_rlimit' is NOT an OS security boundary."
+        },
+        "is_security_boundary": {
+          "type": "boolean"
+        },
+        "limits_applied": {
+          "type": "object"
+        },
+        "limits_skipped": {
+          "type": "object",
+          "description": "Requested limits the platform refused. A skipped limit was NOT enforced."
+        }
+      }
+    },
+    "logs_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

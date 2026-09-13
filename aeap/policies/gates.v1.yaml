@@ -1,0 +1,83 @@
+# AEAP gate policy v1 — RFC-WORKSPACE-AEAP-20260906 §6
+#
+# calibration_status governs executability:
+#   UNCALIBRATED          -> the engine REFUSES to evaluate. A null threshold is a schema
+#                            error, never a permissive default.
+#   CALIBRATED_SYNTHETIC  -> thresholds derived from synthetic development panels only.
+#                            Usable for development and tests. CANNOT support admission.
+#   CALIBRATED_PIT        -> thresholds derived from a pit_compliant snapshot. Not reachable
+#                            in this workspace today (no PIT data exists here).
+schema_version: "1.0"
+policy_id: gates.v1
+calibration_status: UNCALIBRATED
+calibration_receipt: null
+calibrated_at: null
+admission_enabled: false
+admission_disabled_reason: >-
+  No protected evaluator isolated from ordinary agents has been demonstrated in this
+  workspace. Different prompts or role ids under one OS identity are procedural
+  separation only. Per RFC section 6 and independent security review, strict activation
+  and admission stay blocked until P05/P07 and T08/T13/T15 pass.
+
+# ---------------------------------------------------------------- sample conventions
+# Frozen now because these are conventions, not calibrated numbers.
+universe: declared_per_campaign
+frequency: daily
+horizon_days: 5
+return_definition: forward_excess_return_over_equal_weighted_universe_mean
+availability_convention: "feature.available_at <= decision_time; label horizon must have fully matured by decision_time"
+timestamp_alignment: "score at t predicts the return realised over (t, t+horizon]"
+rank_tie_policy: average
+invalid_value_handling: "non-finite scores are dropped from the date's cross-section; they never count toward coverage"
+minimum_assets_per_date: 5           # below this a date is dropped, not imputed
+expected_sign_rule: "preregistered in the proposal; post-evaluation sign flips create a NEW candidate"
+
+# ---------------------------------------------------------------- thresholds
+# Every null below must be filled by a calibration run before evaluation is permitted.
+# EMPIRICAL values are read off the null distribution of our own estimator; DESIGN values
+# are declared house conventions. threshold_provenance records which is which.
+G1_duplicate:
+  exact_expression_hash: true
+  exact_output_match: true
+G2_self_collapse:
+  input_rank_similarity_max: null  # DESIGN — calibrate on YOUR data
+G3_coverage:
+  denominator: eligible_assets_before_label_filtering
+  min_date_coverage: null  # DESIGN — calibrate on YOUR data
+  min_supported_date_fraction: null  # DESIGN — calibrate on YOUR data
+  min_valid_return_pairs: null  # DESIGN — calibrate on YOUR data
+G4_rank_ic:
+  estimator: per_date_spearman_then_time_average
+  uncertainty: newey_west_hac
+  hac_lag_rule: horizon_days_minus_1
+  min_dates: null  # DESIGN — calibrate on YOUR data
+  min_abs_mean_ic: null  # EMPIRICAL — calibrate on YOUR data
+  min_abs_t_stat: null  # EMPIRICAL — calibrate on YOUR data
+  multiplicity: bonferroni_over_campaign_budget
+G5_regime_sign:
+  regimes_defined_before_testing: true
+  required_regimes: [low_vol, high_vol]
+  min_dates_per_regime: null  # DESIGN — calibrate on YOUR data
+  rule: "every required, sufficiently supported regime must have nonzero mean IC in the preregistered direction; unsupported required regimes are INCONCLUSIVE"
+G6_novelty:
+  reference_set: "Z_asof UNION prior_admitted, excluding this candidate"
+  similarity: max_over_z_of_mean_over_t_of_abs_spearman
+  min_overlap_dates: null  # DESIGN — calibrate on YOUR data
+  max_similarity: null  # DESIGN — calibrate on YOUR data
+G7_partial_ic:
+  control_selection: top_k_by_development_feature_similarity   # never by target
+  control_k: null  # DESIGN — calibrate on YOUR data
+  residualization: "rank score, controls and return per date; residualize ranked score and ranked return on the same ranked controls plus intercept; correlate residuals"
+  min_dates: null  # DESIGN — calibrate on YOUR data
+  min_abs_mean_partial_ic: null  # EMPIRICAL — calibrate on YOUR data
+  min_abs_t_stat: null  # EMPIRICAL — calibrate on YOUR data
+G8_fama_macbeth:
+  design: "per date regress forward excess return on candidate + same frozen controls + intercept"
+  singular_design: FAIL              # fails closed, never skipped
+  min_dates: null  # DESIGN — calibrate on YOUR data
+  min_abs_t_stat: null  # EMPIRICAL — calibrate on YOUR data
+  uncertainty: newey_west_hac
+G9_sign_alignment:
+  rule: "sign(mean IC) == sign(mean partial-IC) == sign(mean FM coef) == preregistered expected_sign"
+  zero_or_undefined_is_agreement: false
+  hard_fail: true                    # cannot be downgraded by narrative

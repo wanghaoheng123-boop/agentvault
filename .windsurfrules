@@ -1,0 +1,7 @@
+# AgentVault — Windsurf / Cascade
+
+Follow `AGENTS.md` §1 Workspace Entry Protocol exactly. Do not invent a shorter entry.
+Handoff on interrupt is mandatory: `AGENTS.md` §3.
+Cascade memories are supplementary. `.agentvault/` owns task routing and handoff;
+MemoryBank owns leases and the journal. Never create `.agentvault/MemoryBank/`
+or `workspace/SESSION_STATE.json`.

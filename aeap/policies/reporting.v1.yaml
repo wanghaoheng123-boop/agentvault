@@ -1,0 +1,23 @@
+# Reporting policy v1 — RFC §6 P3.
+schema_version: "1.0"
+policy_id: reporting.v1
+status: ACTIVE
+
+headline_evidence: released_final_process_test_only
+must_disclose:
+  - evaluation_windows
+  - uncertainty
+  - all_campaign_attempts_including_zero_admits
+  - model_vintage_status
+  - data_status_and_biases
+  - compute_and_search_budget
+must_distinguish:
+  - factor_admission
+  - combined_portfolio_evaluation
+  - achievable_net_performance
+forbidden:
+  - net_implementability_claims_without_cost_universe_turnover_evidence
+  - reporting_development_results_as_out_of_sample
+  - suppressing_null_results
+null_results_are_valid_reports: true
+live_trading: out_of_scope

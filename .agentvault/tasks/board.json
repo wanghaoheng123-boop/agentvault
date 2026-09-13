@@ -1,0 +1,24 @@
+{
+  "schema": "agentvault-board-v1",
+  "updated_at": "2026-01-01T00:00:00Z",
+  "status_values": [
+    "UNASSIGNED",
+    "IN_PROGRESS",
+    "BLOCKED",
+    "NEEDS_CONTINUATION",
+    "READY_FOR_REVIEW",
+    "MERGED"
+  ],
+  "tasks": [
+    {
+      "id": "bootstrap-001",
+      "title": "System initialization and verification",
+      "branch": "main",
+      "status": "IN_PROGRESS",
+      "assigned_agent": "setup-agent",
+      "handoff_file": null,
+      "updated_at": "2026-01-01T00:00:00Z",
+      "notes": "Adopter checklist: set core.hooksPath .githooks, declare contested paths in MemoryBank/coord/contested.json, add this project's test command to .agentvault/INDEX.md, then set this task to MERGED."
+    }
+  ]
+}

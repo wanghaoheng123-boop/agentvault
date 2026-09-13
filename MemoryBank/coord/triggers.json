@@ -1,0 +1,123 @@
+{
+  "schema_version": "1.0",
+  "status": "staged_inactive",
+  "last_updated": "2026-09-06T22:36:14+08:00",
+  "rfc_id": "RFC-WORKSPACE-AEAP-20260906",
+  "notes": "Approved intent routing. INACTIVE while protocol.json authority=legacy: nothing dispatches from this file yet. Routing is a capability lookup \u2014 any registered role may send an intent to any other; it is not a requirement to ask the orchestrator for every hop. A mailbox entry alone never launches a runtime; missing execution capacity must leave a visible queued task. Fresh installs ship this inactive.",
+  "hop_cap": 8,
+  "hop_rule": "derived from the parent message; a caller-supplied hop is ignored when --parent is given",
+  "intents": {
+    "workspace.architecture": {
+      "role": "orchestrator",
+      "gate": "truth gate + independent peer + human approval for structure execution",
+      "next": [
+        "code_generator",
+        "doc_writer"
+      ]
+    },
+    "research.verify_source": {
+      "role": "research",
+      "gate": "primary-source match, as-of date, no fabricated content",
+      "next": [
+        "__requester__"
+      ]
+    },
+    "aeap.propose": {
+      "role": "hypothesis",
+      "gate": "falsifiability, mechanism, lineage, no outcome access",
+      "next": [
+        "formalizer"
+      ]
+    },
+    "aeap.formalize": {
+      "role": "formalizer",
+      "gate": "schema, units, dependencies, rationale agreement",
+      "next": [
+        "security_auditor"
+      ]
+    },
+    "aeap.audit_ast": {
+      "role": "security_auditor",
+      "gate": "temporal/type allowlist + adversarial checks",
+      "next": [
+        "sandbox_executor",
+        "__block__"
+      ]
+    },
+    "aeap.execute": {
+      "role": "sandbox_executor",
+      "gate": "isolation capability, resource budget, output invariants",
+      "next": [
+        "quant_judge"
+      ]
+    },
+    "aeap.reference_snapshot": {
+      "role": "novelty_librarian",
+      "gate": "PIT timestamps, ownership, hashes, no future admits",
+      "next": [
+        "hypothesis",
+        "quant_judge"
+      ]
+    },
+    "aeap.evaluate": {
+      "role": "quant_judge",
+      "gate": "independent run; all statistics from code; no repairs",
+      "next": [
+        "peer_reviewer"
+      ]
+    },
+    "aeap.red_team": {
+      "role": "peer_reviewer",
+      "gate": "kill tests, sign, leakage, multiplicity, independence",
+      "next": [
+        "__admission__"
+      ]
+    },
+    "aeap.admit": {
+      "role": "__trusted_coordinator__",
+      "gate": "every required check PASS + fence + expected library revision",
+      "next": [
+        "memory_curator",
+        "doc_writer"
+      ],
+      "enabled": false,
+      "disabled_reason": "no protected writer/evaluator isolation exists in this workspace; admission stays disabled per RFC P05"
+    },
+    "aeap.learn": {
+      "role": "memory_curator",
+      "gate": "no invented status, no held-out leakage, no overwrite",
+      "next": [
+        "hypothesis",
+        "__done__"
+      ]
+    },
+    "aeap.process_replay": {
+      "role": "test_engineer",
+      "gate": "P1/P2/P3, model-vintage disclosure, comparable budgets",
+      "next": [
+        "quant_judge"
+      ]
+    },
+    "aeap.publish": {
+      "role": "doc_writer",
+      "gate": "OOS-only headline, costs, limitations, truthful null results",
+      "next": [
+        "__done__"
+      ]
+    },
+    "artifact.reconcile": {
+      "role": "doc_writer",
+      "gate": "preserve originals; peer validates canonical choice",
+      "next": [
+        "__ownership_commit__"
+      ]
+    },
+    "coord.contract_failure": {
+      "role": "test_engineer",
+      "gate": "isolated fixture, no live destructive test",
+      "next": [
+        "orchestrator"
+      ]
+    }
+  }
+}

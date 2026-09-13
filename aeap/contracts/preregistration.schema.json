@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aeap/contracts/preregistration.schema.json",
+  "title": "Frozen campaign preregistration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "campaign_id",
+    "frozen_at",
+    "question",
+    "policy_versions",
+    "development_period",
+    "final_test_period",
+    "candidate_budget",
+    "expected_sign_rule",
+    "universe",
+    "horizon_days",
+    "final_test_sealed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "campaign_id": {
+      "type": "string"
+    },
+    "frozen_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "question": {
+      "type": "string",
+      "minLength": 20
+    },
+    "policy_versions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "policy name -> sha256 of the frozen policy file"
+    },
+    "development_period": {
+      "type": "object",
+      "required": [
+        "start",
+        "end"
+      ],
+      "properties": {
+        "start": {
+          "type": "string"
+        },
+        "end": {
+          "type": "string"
+        }
+      }
+    },
+    "final_test_period": {
+      "type": "object",
+      "required": [
+        "start",
+        "end"
+      ],
+      "properties": {
+        "start": {
+          "type": "string"
+        },
+        "end": {
+          "type": "string"
+        }
+      }
+    },
+    "candidate_budget": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "repairs_per_candidate": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expected_sign_rule": {
+      "type": "string"
+    },
+    "universe": {
+      "type": "string"
+    },
+    "horizon_days": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "final_test_sealed": {
+      "type": "boolean",
+      "description": "Once opened, further tuning belongs to a new campaign"
+    },
+    "final_test_opened_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "dataset_snapshot_id": {
+      "type": "string"
+    }
+  }
+}

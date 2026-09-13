@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aeap/contracts/admission-receipt.schema.json",
+  "title": "Library admission receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "admitted_at",
+    "gate_report_sha256",
+    "peer_ack_message_id",
+    "expected_library_revision",
+    "journal_seq",
+    "admitted_by_run_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "candidate_id": {
+      "type": "string"
+    },
+    "admitted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "gate_report_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "peer_ack_message_id": {
+      "type": "string"
+    },
+    "expected_library_revision": {
+      "type": "integer"
+    },
+    "journal_seq": {
+      "type": "integer"
+    },
+    "admitted_by_run_id": {
+      "type": "string"
+    }
+  }
+}

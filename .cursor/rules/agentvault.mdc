@@ -1,0 +1,13 @@
+---
+description: AgentVault — follow AGENTS.md §1 Workspace Entry Protocol exactly
+globs: ["**/*"]
+alwaysApply: true
+---
+
+Follow `AGENTS.md` §1 Workspace Entry Protocol; handoff per §3 before yielding.
+
+`.agentvault/` (task board, handoffs, invariants, ADRs) owns task routing and
+continuity. MemoryBank + `bin/avcoord` own TTL leases, the journal, and the
+deterministic gate. Never create `.agentvault/MemoryBank/` (the health check
+rejects the nesting as DUAL_SSOT), `workspace/SESSION_STATE.json`, or
+`MemoryBank/active/`.

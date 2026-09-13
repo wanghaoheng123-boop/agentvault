@@ -1,0 +1,125 @@
+{
+  "schema_version": "1.0",
+  "last_updated": "2026-09-05T14:30:56+08:00",
+  "agents": [
+    {
+      "id": "orchestrator",
+      "persona": "Master_Orchestrator",
+      "alias": "@Orchestrator",
+      "write_scopes": [
+        "MemoryBank/CURRENT.md",
+        "MemoryBank/board.md",
+        "MemoryBank/activeContext.md",
+        "MemoryBank/sessions/**",
+        "MemoryBank/coord/**",
+        "MemoryBank/progress.md",
+        "EpisodicTracker/**",
+        "GraphRAG/schema.json",
+        "OpenViking/**",
+        "AGENTS.md",
+        "AGENTS.codex.md",
+        "scripts/coord/**",
+        "bin/**",
+        "README.md",
+        ".cursor/**",
+        ".githooks/**",
+        "VectorRAG/index.json",
+        "templates/**",
+        "ADOPT.md",
+        "MemoryBank/agents/playbooks/**"
+      ],
+      "status": "active",
+      "playbooks": [
+        "orchestrator.md"
+      ]
+    },
+    {
+      "id": "research",
+      "persona": "Research-Agent",
+      "alias": "@Research-Agent",
+      "write_scopes": [
+        "MemoryBank/agents/research/**",
+        "MemoryBank/coord/mail/research/**",
+        "MemoryBank/sessions/**",
+        "VectorRAG/**"
+      ],
+      "status": "active",
+      "playbooks": [
+        "research.md",
+        "quant_researcher.md",
+        "mathematician.md",
+        "ai_systems.md"
+      ]
+    },
+    {
+      "id": "code_generator",
+      "persona": "Code-Generator",
+      "alias": "@Code-Generator",
+      "write_scopes": [
+        "MemoryBank/agents/code_generator/**",
+        "MemoryBank/coord/mail/code_generator/**",
+        "MemoryBank/sessions/**",
+        "scripts/**"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "security_auditor",
+      "persona": "Security-Auditor",
+      "alias": "@Security-Auditor",
+      "write_scopes": [
+        "MemoryBank/agents/security_auditor/**",
+        "MemoryBank/coord/mail/security_auditor/**",
+        "MemoryBank/sessions/**"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "peer_reviewer",
+      "persona": "Peer-Reviewer",
+      "alias": "@Peer-Reviewer",
+      "write_scopes": [
+        "MemoryBank/agents/peer_reviewer/**",
+        "MemoryBank/coord/mail/peer_reviewer/**",
+        "MemoryBank/sessions/**",
+        "audit-ledger.md"
+      ],
+      "status": "active",
+      "playbooks": [
+        "peer_reviewer.md"
+      ]
+    },
+    {
+      "id": "doc_writer",
+      "persona": "Doc-Writer",
+      "alias": "@Doc-Writer",
+      "write_scopes": [
+        "MemoryBank/agents/doc_writer/**",
+        "MemoryBank/coord/mail/doc_writer/**",
+        "MemoryBank/sessions/**",
+        "README.md",
+        "VectorRAG/**"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "test_engineer",
+      "persona": "Test-Engineer",
+      "alias": "@Test-Engineer",
+      "write_scopes": [
+        "MemoryBank/agents/test_engineer/**",
+        "MemoryBank/coord/mail/test_engineer/**",
+        "MemoryBank/sessions/**",
+        "scripts/coord/**"
+      ],
+      "status": "active"
+    }
+  ],
+  "playbooks_dir": "MemoryBank/agents/playbooks",
+  "expertise": {
+    "quick": "MemoryBank/coord/EXPERTISE.quick.md",
+    "anti_hallucination_gate": "MemoryBank/coord/ANTI_HALLUCINATION_GATE.md",
+    "quant_desk": "MemoryBank/coord/QUANT_DESK_PROTOCOL.md",
+    "activation": "OpenViking/L2_Expertise_Activation.md"
+  }
+}
