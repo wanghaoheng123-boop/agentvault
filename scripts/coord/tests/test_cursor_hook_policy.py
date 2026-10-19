@@ -9,20 +9,47 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from conftest import _scaffold, current_md
+
 ROOT = Path(__file__).resolve().parents[3]
 HOOK = ROOT / ".cursor" / "hooks" / "avcoord-lease-check.py"
+WS: Path  # sandbox workspace root, set by the module fixture below
+
+
+@pytest.fixture(scope="module", autouse=True)
+def sandbox_workspace(tmp_path_factory):
+    """Run the real hook against a throwaway workspace, never this repository.
+
+    The hook and the CLI resolve all state from AVCOORD_ROOT, so pointing it at
+    the repo made every run write claim/release lines into the real
+    MemoryBank/coord/audit.jsonl. The sandbox carries the real coordinator,
+    registry and contested map, so lease decisions match the repository's.
+    CURRENT.md is stale on purpose: `status` then exits nonzero, as it does in
+    a fresh install, which is the case the escape-hatch tests must survive.
+    """
+    global WS
+    root = tmp_path_factory.mktemp("cursor-hook-ws")
+    _scaffold(root)
+    shutil.copytree(ROOT / "scripts" / "coord", root / "scripts" / "coord", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__", "tests"))
+    for rel in ("MemoryBank/agents/registry.json", "MemoryBank/coord/contested.json"):
+        shutil.copy2(ROOT / rel, root / rel)
+    (root / "MemoryBank" / "CURRENT.md").write_text(current_md("2026-01-01T00:00:00+08:00"))
+    WS = root
+    yield root
 
 
 def run_hook(payload: dict) -> dict:
     env = {k: v for k, v in os.environ.items()
            if k not in ("AVCOORD_RUN_ID", "AVCOORD_RUN_TOKEN")}
-    env["AVCOORD_ROOT"] = str(ROOT)
+    env["AVCOORD_ROOT"] = str(WS)
     # A registered agent that holds no leases. An UNregistered id makes
     # check-lease fail on agent validation instead of on lease state, which
     # would make these tests pass for the wrong reason.
@@ -103,7 +130,7 @@ def test_read_only_tools_still_pass():
 # --- malformed input ------------------------------------------------------
 def test_malformed_payload_denies():
     env = {k: v for k, v in os.environ.items()}
-    env["AVCOORD_ROOT"] = str(ROOT)
+    env["AVCOORD_ROOT"] = str(WS)
     proc = subprocess.run([sys.executable, str(HOOK)], input="{not json",
                           capture_output=True, text=True, env=env, timeout=30)
     assert json.loads(proc.stdout)["reason_code"] == "AV_DENY_MALFORMED"
@@ -172,13 +199,13 @@ CLI = ROOT / "scripts" / "coord" / "avcoord.py"
 def live_lease():
     res = ".scratch-hatch-test/"
     env = os.environ.copy()
-    env["AVCOORD_ROOT"] = str(ROOT)
+    env["AVCOORD_ROOT"] = str(WS)
     for k in ("AVCOORD_RUN_ID", "AVCOORD_RUN_TOKEN"):
         env.pop(k, None)
     claim = subprocess.run(
         [sys.executable, str(CLI), "claim", "--agent", "peer_reviewer",
          "--resource", res],
-        capture_output=True, text=True, env=env, cwd=str(ROOT), timeout=30)
+        capture_output=True, text=True, env=env, cwd=str(WS), timeout=30)
     assert claim.returncode == 0, f"fixture could not claim: {claim.stderr}"
     try:
         yield res
@@ -186,7 +213,7 @@ def live_lease():
         subprocess.run(
             [sys.executable, str(CLI), "release", "--agent", "peer_reviewer",
              "--resource", res],
-            capture_output=True, text=True, env=env, cwd=str(ROOT), timeout=30)
+            capture_output=True, text=True, env=env, cwd=str(WS), timeout=30)
 
 
 def test_escape_hatch_opens_under_a_real_live_lease(live_lease):
@@ -209,6 +236,34 @@ def test_escape_hatch_is_closed_without_a_lease():
     assert r["permission"] == "deny", r
 
 
+def test_lease_fixture_stays_out_of_the_repository_journal(request):
+    """The fixture's claim and release must land in a sandbox, not in this repo.
+
+    They used to run against the repository itself, so every pytest run
+    appended claim/release lines for .scratch-hatch-test/ to the real
+    MemoryBank/coord/audit.jsonl. Every worktree then carried journal lines
+    that were committed without a lease, which the pre-merge audit rejects
+    under C1. This checks the appended bytes, not the file size: in the main
+    checkout live agents append to the same journal while the suite runs.
+    """
+    journal = ROOT / "MemoryBank" / "coord" / "audit.jsonl"
+    start = journal.stat().st_size if journal.exists() else 0
+    res = request.getfixturevalue("live_lease")
+    assert shell("make build")["reason_code"] == "AV_ALLOW_LEASED_SHELL"
+    appended = journal.read_bytes()[start:] if journal.exists() else b""
+    assert res.encode() not in appended, (
+        "fixture wrote to the repository's audit.jsonl",
+        appended.decode(errors="replace")[-400:])
+    held = []
+    for p in (ROOT / "MemoryBank" / "coord" / "leases").glob("*.json"):
+        try:
+            if res in p.read_text():
+                held.append(p.name)
+        except FileNotFoundError:  # a live agent released its lease meanwhile
+            pass
+    assert held == [], f"fixture lease landed in the repository's lease store: {held}"
+
+
 def test_escape_hatch_survives_a_nonzero_status_exit(live_lease):
     """A stale CURRENT.md must not disable the escape hatch.
 
@@ -219,11 +274,13 @@ def test_escape_hatch_survives_a_nonzero_status_exit(live_lease):
     dead escape hatch for every adopter, no matter how many leases were held.
     """
     env = os.environ.copy()
-    env["AVCOORD_ROOT"] = str(ROOT)
+    env["AVCOORD_ROOT"] = str(WS)
     proc = subprocess.run([sys.executable, str(CLI), "status", "--json"],
                           capture_output=True, text=True, env=env,
-                          cwd=str(ROOT), timeout=30)
+                          cwd=str(WS), timeout=30)
     payload = json.loads(proc.stdout)
+    # The sandbox's CURRENT.md is stale, so this is the nonzero exit under test.
+    assert proc.returncode != 0, payload
     # The lease must be visible in the payload whatever the exit code says.
     assert any(l.get("agent") == "peer_reviewer" for l in payload.get("leases") or []), payload
     r = shell("make build")
