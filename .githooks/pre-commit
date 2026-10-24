@@ -43,7 +43,9 @@ while IFS= read -r f; do
   if [[ "$rc" -ne 0 ]]; then
     echo "avcoord pre-commit: contested path lacks live lease for $AGENT: $f" >&2
     echo "  $out" >&2
-    echo "  Fix: bin/avcoord claim --agent $AGENT --resource $f" >&2
+    # Name the store this hook reads. From a linked worktree, bin/avcoord
+    # claims into that worktree's own store, which is never checked here.
+    echo "  Fix: AVCOORD_ROOT=\"$MAIN_REPO\" python3 scripts/coord/avcoord.py claim --agent $AGENT --resource \"$f\"" >&2
     fail=1
   fi
 done < <(git diff --cached --name-only --diff-filter=ACMRD)
