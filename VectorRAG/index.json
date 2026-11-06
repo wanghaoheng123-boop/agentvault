@@ -1,6 +1,17 @@
 {
   "schema_version": "1.0",
-  "last_updated": "2026-09-05T14:25:47+08:00",
+  "last_updated": "2026-11-06T14:28:00Z",
   "description": "Catalog of reference materials. Check before loading raw files.",
-  "references": []
+  "references": [
+    {
+      "id": "equity-metals-2026-07-fact-base",
+      "path": "VectorRAG/references/equity-metals-2026-07/fact_base_2026-07-19.json",
+      "title": "Verified market fact base — Gold/Silver/B/NKE/KHC/CAG/ADBE",
+      "as_of": "2026-07-17 market close",
+      "source": "yfinance / Yahoo Finance",
+      "tags": ["P1", "equities", "commodities", "publication", "educational-watchlist"],
+      "related_publication": "publications/equity-metals-2026-07/PUBLICATION.md",
+      "note": "Educational watchlist only — not buy advice. Refresh before publication."
+    }
+  ]
 }
